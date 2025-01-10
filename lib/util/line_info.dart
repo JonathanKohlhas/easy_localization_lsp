@@ -24,4 +24,8 @@ class LineInfo {
     }
     return Position(line: line, character: column);
   }
+
+  int getOffset(Position position) {
+    return lineBreaks[position.line] + position.character;
+  }
 }

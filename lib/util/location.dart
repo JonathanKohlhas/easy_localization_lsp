@@ -32,6 +32,33 @@ extension CompareRange on lsp.Range {
   }
 }
 
+extension CopyWithLocation on lsp.Location {
+  lsp.Location copyWith({
+    lsp.Position? start,
+    lsp.Position? end,
+  }) {
+    return lsp.Location(
+      uri: uri,
+      range: lsp.Range(
+        start: start ?? range.start,
+        end: end ?? range.end,
+      ),
+    );
+  }
+}
+
+extension CopyWithRange on lsp.Range {
+  lsp.Range copyWith({
+    lsp.Position? start,
+    lsp.Position? end,
+  }) {
+    return lsp.Range(
+      start: start ?? this.start,
+      end: end ?? this.end,
+    );
+  }
+}
+
 class Location {
   final String file;
   final int offset;

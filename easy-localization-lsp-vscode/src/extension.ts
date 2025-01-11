@@ -38,10 +38,10 @@ export function activate(context: ExtensionContext) {
 	const clientOptions: LanguageClientOptions = {
 		// Register the server for plain text documents
 		documentSelector: [{ scheme: 'file', language: 'dart' }, { scheme: 'file', language: 'json' }],
-		// synchronize: {
-		// 	// Notify the server about file changes to '.clientrc files contained in the workspace
-		// 	fileEvents: [workspace.createFileSystemWatcher('**/*.json'), workspace.createFileSystemWatcher('**/*.dart')]
-		// }
+		synchronize: {
+			// Notify the server about file changes to '.clientrc files contained in the workspace
+			fileEvents: [workspace.createFileSystemWatcher('**/*.json'), workspace.createFileSystemWatcher('**/*.dart')]
+		}
 	};
 
 	// Create the language client and start the client.

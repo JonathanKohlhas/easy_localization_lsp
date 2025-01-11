@@ -13,7 +13,7 @@
 				"--extensionDevelopmentPath=${workspaceFolder}"
 			],
 			"outFiles": [
-				"${workspaceFolder}/out/**/*.js"
+				"${workspaceFolder}/easy-localization-lsp-vscode/out/**/*.js"
 			],
 			"preLaunchTask": "${defaultBuildTask}"
 		}

@@ -17,19 +17,19 @@ class EasyLocalizationAnalyzer {
 
   EasyLocalizationAnalyzer(this.log);
 
-  List<String> get filesWithUnresolvedTranslations =>
-      translationCallsByFile.entries
-          .where((entry) => entry.value.any((call) => !call.isValid))
-          .map((entry) => entry.key)
-          .toList();
+  List<String> get filesWithUnresolvedTranslations => translationCallsByFile.entries
+      .where((entry) => entry.value.any((call) => !call.isValid))
+      .map((entry) => entry.key)
+      .toList();
 
   List<AnalysisError> analyzeFile(AnalysisContext context, String path) {
+    // log("Analyzing file: $path");
     final errors = <AnalysisError>[];
-    if (context.currentSession.getParsedUnit(path)
-        case ParsedUnitResult(unit: final unit)) {
+    if (context.currentSession.getParsedUnit(path) case ParsedUnitResult(unit: final unit)) {
       final visitor = TranslationVisitor();
       unit.accept(visitor);
       final invocations = visitor.list;
+
       final calls = invocations.map((call) {
         final start = unit.lineInfo.getLocation(call.offset);
         final end = unit.lineInfo.getLocation(call.end);
@@ -46,9 +46,7 @@ class EasyLocalizationAnalyzer {
               endColumn: end.columnNumber,
             ));
       });
-      final resolvedCalls = calls
-          .map((call) => call.resolve(translationFiles.values.toList()))
-          .toList();
+      final resolvedCalls = calls.map((call) => call.resolve(translationFiles.values.toList())).toList();
 
       translationCallsByFile[path] = resolvedCalls;
 
@@ -67,9 +65,8 @@ class EasyLocalizationAnalyzer {
   }
 
   void analyzeTranslationFile(AnalysisContext context, String path) {
-    final content = context.currentSession.resourceProvider
-        .getFile(path)
-        .readAsStringSync();
+    // log("Analyzing translation file: $path");
+    final content = context.currentSession.resourceProvider.getFile(path).readAsStringSync();
     final entries = JsonParser(content, sourceName: path).parse();
     if (entries is! JsonLocationMap) {
       throw ("Entries in translation file incorrect");
@@ -83,8 +80,7 @@ class EasyLocalizationAnalyzer {
       return [];
     }
 
-    final overlappingCalls = calls.where((call) =>
-        offset >= call.invocation.offset && offset <= call.invocation.end);
+    final overlappingCalls = calls.where((call) => offset >= call.invocation.offset && offset <= call.invocation.end);
 
     final locations = <Location>[];
 
@@ -102,9 +98,7 @@ class EasyLocalizationAnalyzer {
     if (calls == null) {
       return null;
     }
-    final overlappingCall = calls
-        .where((call) => call.location.toLsp().range.contains(params.position))
-        .firstOrNull;
+    final overlappingCall = calls.where((call) => call.location.toLsp().range.contains(params.position)).firstOrNull;
     if (overlappingCall == null) {
       return null;
     }
@@ -121,9 +115,7 @@ class EasyLocalizationAnalyzer {
       text += "Translation: $value\n";
     }
 
-    return lsp.Hover(
-        contents: lsp.Either2.t2(text),
-        range: overlappingCall.location.toLsp().range);
+    return lsp.Hover(contents: lsp.Either2.t2(text), range: overlappingCall.location.toLsp().range);
   }
 
   lsp.CompletionList getCompletion(DocumentPositionRequest r) {
@@ -131,8 +123,7 @@ class EasyLocalizationAnalyzer {
     final line = lines[r.position.line];
     //check if the position is insied some quotes (single or double) and find the string if it is in some
     final quotes = RegExp(r'''['"]''');
-    final quoteBefore =
-        line.substring(0, r.position.character).lastIndexOf(quotes);
+    final quoteBefore = line.substring(0, r.position.character).lastIndexOf(quotes);
     final quoteAfter = line.indexOf(quotes, r.position.character);
     //log("Quote before: $quoteBefore, Quote after: $quoteAfter");
     //We are ignoring the possibility of having a string that contains both single and double quotes
@@ -143,13 +134,8 @@ class EasyLocalizationAnalyzer {
       final start = quoteBefore + 1;
       final end = quoteAfter;
       final key = line.substring(start, end);
-      log("Key: $key");
       final completions = translationFiles.values
           .expand((file) => file.keys)
-          .map((k) {
-            log(k);
-            return k;
-          })
           .where((translationKey) => translationKey.startsWith(key))
           .map((key) => lsp.CompletionItem(
                 label: key,
@@ -168,8 +154,7 @@ class EasyLocalizationAnalyzer {
       //final key = translationFile.locations.value.
       final key = translationFile
           .getFlatKeys()
-          .where((k) =>
-              k.entry.key.location.toLsp().range.contains(params.position))
+          .where((k) => k.entry.key.location.toLsp().range.contains(params.position))
           .firstOrNull;
       if (key == null) return [];
 
@@ -183,6 +168,75 @@ class EasyLocalizationAnalyzer {
     }
     return [];
   }
+
+  Future<lsp.Either2<lsp.Range, lsp.PrepareRenameResult>?> prepareRename(lsp.TextDocumentPositionParams params) async {
+    if (params.textDocument.uri.path.endsWith(".json")) {
+      final translationFile = translationFiles[params.textDocument.uri.path];
+      if (translationFile == null) return null;
+      final key = translationFile
+          .getFlatKeys()
+          .where((k) => k.entry.key.location.toLsp().range.contains(params.position))
+          .firstOrNull;
+      if (key == null) return null;
+      final range = key.entry.key.location.toLsp().range;
+      final onlyText = lsp.Range(
+          start: lsp.Position(line: range.start.line, character: range.start.character + 1),
+          end: lsp.Position(line: range.end.line, character: range.end.character - 1));
+      return lsp.Either2.t1(onlyText);
+    }
+
+    return null;
+  }
+
+  Future<RenameResponse?> rename(lsp.RenameParams params) async {
+    if (params.textDocument.uri.path.endsWith(".json")) {
+      final affectedFiles = <String>{params.textDocument.uri.path};
+      final translationFile = translationFiles[params.textDocument.uri.path];
+      if (translationFile == null) return null;
+      final key = translationFile
+          .getFlatKeys()
+          .where((k) => k.entry.key.location.toLsp().range.contains(params.position))
+          .firstOrNull;
+      if (key == null) return null;
+      final range = key.entry.key.location.toLsp().range;
+      final onlyText = lsp.Range(
+          start: lsp.Position(line: range.start.line, character: range.start.character + 1),
+          end: lsp.Position(line: range.end.line, character: range.end.character));
+      // final Map<Uri, List<lsp.TextEdit>> changes = {};
+      // changes[params.textDocument.uri] = [lsp.TextEdit(range: onlyText, newText: params.newName)];
+      final keyParts = key.fullKey.split(".");
+      final newFullKey = [...keyParts.sublist(0, keyParts.length - 1), params.newName].join(".");
+
+      final keyRename = <Uri, List<lsp.TextEdit>>{
+        params.textDocument.uri: [lsp.TextEdit(range: onlyText, newText: params.newName)]
+      };
+
+      final allEdits = translationCallsByFile.values
+          .expand((values) => values)
+          .where((call) => call.translationKey == key.fullKey)
+          .map((call) {
+        final callRange = call.location.toLsp().range;
+        final stringLength = call.invocation.target!.length;
+        final textRange = lsp.Range(
+            start: lsp.Position(line: callRange.start.line, character: callRange.start.character + 1),
+            end: lsp.Position(line: callRange.start.line, character: callRange.start.character + stringLength - 1));
+        affectedFiles.add(call.location.file);
+        return (key: Uri.parse(call.location.file), value: lsp.TextEdit(range: textRange, newText: newFullKey));
+      }).fold(keyRename, (acc, edit) {
+        if (acc.containsKey(edit.key)) {
+          acc[edit.key]!.add(edit.value);
+        } else {
+          acc[edit.key] = [edit.value];
+        }
+        return acc;
+      });
+
+      return RenameResponse(lsp.WorkspaceEdit(changes: allEdits), affectedFiles.toList());
+    }
+
+    return null;
+  }
+
 /*
   @override
   void computeNavigation(
@@ -233,4 +287,11 @@ class EasyLocalizationAnalyzer {
   //     }
   //   }
   // }
+}
+
+class RenameResponse {
+  final lsp.WorkspaceEdit edit;
+  final List<String> affectedFiles;
+
+  RenameResponse(this.edit, this.affectedFiles);
 }

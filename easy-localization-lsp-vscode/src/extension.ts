@@ -63,14 +63,20 @@ export function activate(context: ExtensionContext) {
 
 	// Options to control the language client
 	const clientOptions: LanguageClientOptions = {
-		revealOutputChannelOn: RevealOutputChannelOn.Info,
+		// revealOutputChannelOn: RevealOutputChannelOn.Info,
 		// Register the server for plain text documents
-		documentSelector: [{ scheme: 'file', language: 'dart' }, { scheme: 'file', language: 'json' }],
+		documentSelector: [
+			{ scheme: 'file', language: 'dart' },
+			{ scheme: 'file', language: 'json' },
+		],
 		synchronize: {
 			// Notify the server about file changes to '.clientrc files contained in the workspace
-			fileEvents: [workspace.createFileSystemWatcher('**/*.json'), workspace.createFileSystemWatcher('**/*.dart')]
+			fileEvents: [
+				workspace.createFileSystemWatcher('**/*.json'),
+				workspace.createFileSystemWatcher('**/*.dart'),
+			]
 		},
-		errorHandler: new MyErrorHandler(),
+		// errorHandler: new MyErrorHandler(),
 
 	};
 

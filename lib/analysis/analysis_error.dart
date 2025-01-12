@@ -23,7 +23,8 @@ enum AnalysisErrorSeverity {
 
 enum AnalysisErrorCode {
   unknown,
-  noSuchTranslation,
+  translationKeyTooShort,
+  translationKeyTooLong,
   missingPluralTranslation,
   missingGenderTranslation;
 

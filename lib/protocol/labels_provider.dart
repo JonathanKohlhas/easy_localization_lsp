@@ -39,3 +39,5 @@ extension TranslationLabelProviderConnection on Connection {
     sendNotification(publishTranslationLabelsMethod, notification.toJson());
   }
 }
+
+const String translationLabelsProvider = "easyLocalizationTranslationLabelsProvider";

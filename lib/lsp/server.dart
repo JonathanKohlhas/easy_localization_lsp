@@ -10,19 +10,13 @@ import 'package:analyzer/file_system/overlay_file_system.dart';
 import 'package:analyzer/file_system/physical_file_system.dart';
 import 'package:easy_localization_lsp/analysis/analyzer.dart';
 import 'package:easy_localization_lsp/config/config.dart';
+import 'package:easy_localization_lsp/lsp/connection.dart';
 import 'package:easy_localization_lsp/protocol/labels_provider.dart';
 import 'package:easy_localization_lsp/protocol/progress.dart';
 import 'package:easy_localization_lsp/protocol/utils.dart';
+import 'package:easy_localization_lsp/util/utils.dart';
 import 'package:lsp_server/lsp_server.dart';
 import 'package:uuid/v4.dart';
-
-abstract class ConnectionType {
-  factory ConnectionType.socket(int port) => SocketConnection(port);
-
-  factory ConnectionType.stdio() => StdioConnection();
-
-  FutureOr<Connection> initialize();
-}
 
 class DocumentPositionRequest {
   DocumentPositionRequest(this.path, this.position, this.unit);
@@ -44,6 +38,7 @@ class EasyLocalizationLspServer {
   late final Connection _connection;
   int _overlayModificationStamp = 0;
   final ListQueue<String> _priorityFiles = ListQueue();
+  final _fileChangeController = StreamController<List<String>>();
   late final OverlayResourceProvider _resourceProvider;
   Socket? _socket;
 
@@ -59,8 +54,6 @@ class EasyLocalizationLspServer {
     _connection.onHover(_onHover);
     _connection.onCompletion(_onCompletion);
     _connection.onReferences(_getReferences);
-    //_connection.onRenameRequest(_onRename);
-    //_connection.onPrepareRename(_onRenamePrepare);
     _connection.onRequest('textDocument/prepareRename', (params) async {
       var prepareParams = TextDocumentPositionParams.fromJson(params.value);
       return await _onRenamePrepare(prepareParams);
@@ -101,6 +94,7 @@ class EasyLocalizationLspServer {
   }
 
   Future<void> _analyzeFile(String file, AnalysisContext context) async {
+    await suspendToScheduler();
     try {
       final rootPath = context.contextRoot.root.path;
       final config = _configs[rootPath];
@@ -117,15 +111,10 @@ class EasyLocalizationLspServer {
 
         if (_clientCapabilities.experimental case {"supportsEasyLocalizationTranslationLabels": true}) {
           final List<TranslationLabel> labels = _analyzer.getTranslationLabels(file);
-          _connection.log("Sending translation labels for $file: ${labels.length}");
           _connection.sendTranslationLabels(TranslationLabelNotification(file, labels));
         }
       } else if (config.isTranslationFile(file)) {
         _analyzer.analyzeTranslationFile(context, file);
-        final dartFiles = context.contextRoot.analyzedFiles().where((f) {
-          return f.endsWith('.dart');
-        }).toList();
-        _analyzeFiles(dartFiles, context);
       }
     } on InconsistentAnalysisException catch (e) {
       _connection.log("""
@@ -265,6 +254,7 @@ Assumed to be non-fatal, probably just running analysis on a file that has just 
   }
 
   Future<dynamic> _onDidChangeTextDocument(DidChangeTextDocumentParams params) async {
+    _connection.log("onDidChangeTextDocument: ${params.textDocument.uri.path}");
     var contentChanges = params.contentChanges.map((content) {
       return content.map(
         (document) => TextDocumentContentChangeEvent2(text: document.text),
@@ -315,6 +305,7 @@ Assumed to be non-fatal, probably just running analysis on a file that has just 
     _analyzer = EasyLocalizationAnalyzer(_collection, rootPaths, _connection.log);
 
     Future.delayed(Duration.zero, () async {
+      _connection.log("Initializing analysis");
       for (final context in _collection.contexts) {
         final options = analysisOptionsFromFile(context);
         _configs[context.contextRoot.root.path] = options ?? EasyLocalizationAnalysisOptions();
@@ -330,12 +321,12 @@ Assumed to be non-fatal, probably just running analysis on a file that has just 
           hoverProvider: Either2.t1(true),
           completionProvider: CompletionOptions(
             resolveProvider: false,
-            triggerCharacters: ['.', '"'],
+            triggerCharacters: ['.', '"', "'"],
           ),
           renameProvider: Either2.t1(true),
           // codeActionProvider: Either2.t1(true),
           experimental: {
-            'easyLocalizationTranslationLabelsProvider': true,
+            translationLabelsProvider: true,
           }),
     );
   }
@@ -359,25 +350,4 @@ class EasyLocalizationLspServerOptions {
   }) : connection = connection ?? ConnectionType.stdio();
 
   final ConnectionType connection;
-}
-
-class SocketConnection implements ConnectionType {
-  const SocketConnection(this.port);
-
-  final int port;
-
-  @override
-  Future<Connection> initialize() async {
-    final socket = await Socket.connect(InternetAddress.loopbackIPv4, port);
-    return Connection(socket, socket);
-  }
-}
-
-class StdioConnection implements ConnectionType {
-  const StdioConnection();
-
-  @override
-  Connection initialize() {
-    return Connection(stdin, stdout);
-  }
 }

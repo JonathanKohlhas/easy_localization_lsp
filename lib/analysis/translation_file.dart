@@ -115,7 +115,7 @@ class TranslationFile {
     if (keys.isEmpty) {
       return TranslationFailure(TranslationFailureReason.noSuchTranslationKeyTooShort);
     }
-    TranslationResult translate(JsonLocationMap map, List<String> keys) {
+    TranslationResult translateHelper(JsonLocationMap map, List<String> keys) {
       final head = keys.removeAt(0);
       final entry = map.value[head]?.value;
       if (keys.isEmpty) {
@@ -130,9 +130,13 @@ class TranslationFile {
           case JsonLocationMap():
             if (isPlural && PluralCase.values.any((pluralCase) => entry.value.containsKey(pluralCase.name))) {
               return TranslationSuccess(entry);
-            } else if (isGendered) {
+            }
+            if (isGendered) {
               return TranslationSuccess(entry);
             }
+            return TranslationFailure(TranslationFailureReason.noSuchTranslationKeyTooShort);
+          case null:
+            return TranslationFailure(TranslationFailureReason.noSuchTranslationKeyTooLong);
           default:
             // TODO could check in more detail, for example if the translation is a map that looks like a plural map
             // with all keys being plural cases, the error could say something like translationIsPluralButCallIsNot
@@ -141,13 +145,13 @@ class TranslationFile {
       }
 
       if (entry is JsonLocationMap) {
-        return translate(entry, keys);
+        return translateHelper(entry, keys);
       }
 
       return TranslationFailure(TranslationFailureReason.noSuchTranslationKeyTooLong);
     }
 
-    return translate(locations, keys);
+    return translateHelper(locations, keys);
   }
 
   TranslationResult translateCall(TranslationCall call) {

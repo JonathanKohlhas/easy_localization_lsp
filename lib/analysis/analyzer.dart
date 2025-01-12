@@ -9,6 +9,7 @@ import 'package:analyzer/source/line_info.dart';
 import 'package:easy_localization_lsp/analysis/analysis_error.dart';
 import 'package:easy_localization_lsp/analysis/translation_call.dart';
 import 'package:easy_localization_lsp/analysis/translation_file.dart';
+import 'package:easy_localization_lsp/analysis/translation_result.dart';
 import 'package:easy_localization_lsp/analysis/translation_visitor.dart';
 import 'package:easy_localization_lsp/easy_localization_lsp.dart';
 import 'package:easy_localization_lsp/json/parser.dart';
@@ -22,14 +23,14 @@ class EasyLocalizationAnalyzer {
   final List<String> rootPaths;
 
   Map<String, List<ResolvedTranslationCall>> translationCallsByFile = {};
-
   Map<String, TranslationFile> translationFiles = {};
+
+  List<String> get filesWithTranslations => translationFiles.keys.toList();
+
   final AnalysisContextCollection _collection;
   EasyLocalizationAnalyzer(this._collection, this.rootPaths, this.log);
 
   void analyzeFile(AnalysisContext context, String path) {
-    // log("Analyzing file: $path");
-    final errors = <AnalysisError>[];
     if (context.currentSession.getParsedUnit(path) case ParsedUnitResult(unit: final unit)) {
       final visitor = TranslationVisitor();
       unit.accept(visitor);
@@ -58,18 +59,32 @@ class EasyLocalizationAnalyzer {
   }
 
   List<AnalysisError> getDiagnostics(String path) {
-    return translationCallsByFile[path]
-            ?.where((call) => !call.isValid)
-            .map((call) => AnalysisError(
-                  AnalysisErrorSeverity.error,
-                  call.location,
-                  "Translation not found: ${call.translationKey}",
-                  code: AnalysisErrorCode.noSuchTranslation,
-                ))
-            .toList() ??
+    return translationCallsByFile[path]?.where((call) => !call.isValid).map((call) {
+          final failureReason = call.translationResults
+              .map((result) => switch (result) {
+                    TranslationFailure(reason: final reason) => reason,
+                    _ => null,
+                  })
+              .whereType<TranslationFailureReason>()
+              .fold(TranslationFailureReason.unknown, (acc, reason) {
+            if (reason.specificity > acc.specificity) {
+              return reason;
+            }
+            return acc;
+          });
+
+          return AnalysisError(
+            AnalysisErrorSeverity.error,
+            call.location,
+            failureReason.message,
+            code: failureReason.toAnalysisErrorCode(),
+          );
+        }).toList() ??
         [];
   }
 
+  /// Analyze the translation file and caches the files contents
+  /// Returns a list of file paths that may be affected by the new translation file
   void analyzeTranslationFile(AnalysisContext context, String path) {
     final content = context.currentSession.resourceProvider.getFile(path).readAsStringSync();
     final entries = JsonParser(content, sourceName: path).parse();
@@ -126,6 +141,7 @@ class EasyLocalizationAnalyzer {
       final start = quoteBefore + 1;
       final end = quoteAfter;
       final key = line.substring(start, end);
+      log("Suggestions for Key: $key");
       final completions = translationFiles.values
           .expand((file) => file.keys)
           .where((translationKey) => translationKey.startsWith(key))
@@ -363,7 +379,9 @@ class EasyLocalizationAnalyzer {
 
   List<lsp.CodeAction> _tryAddMissingTranslation(lsp.CodeActionParams params) {
     return params.context.diagnostics
-        .where((diagnostic) => diagnostic.code == AnalysisErrorCode.noSuchTranslation.name)
+        .where(
+          (diagnostic) => diagnostic.code == AnalysisErrorCode.translationKeyTooLong.name,
+        )
         .map((diagnostic) {
           final (range, selectedString) =
               getSelectedStringLiteralByRange(params.textDocument.uri.path, diagnostic.range) ?? (null, null);

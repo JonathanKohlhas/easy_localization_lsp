@@ -25,7 +25,7 @@ class EasyLocalizationAnalyzer {
   Map<String, List<ResolvedTranslationCall>> translationCallsByFile = {};
   Map<String, TranslationFile> translationFiles = {};
 
-  List<String> get filesWithTranslations => translationFiles.keys.toList();
+  List<String> get filesWithTranslations => translationCallsByFile.keys.toList();
 
   final AnalysisContextCollection _collection;
   EasyLocalizationAnalyzer(this._collection, this.rootPaths, this.log);
@@ -126,20 +126,24 @@ class EasyLocalizationAnalyzer {
   }
 
   lsp.CompletionList getCompletion(DocumentPositionRequest r) {
-    final lines = r.unit.content.split("\n");
+    final lines =
+        _collection.contextFor(r.path).currentSession.resourceProvider.getFile(r.path).readAsStringSync().split("\n");
     final line = lines[r.position.line];
     //check if the position is insied some quotes (single or double) and find the string if it is in some
     final quotes = RegExp(r'''['"]''');
-    final quoteBefore = line.substring(0, r.position.character).lastIndexOf(quotes);
-    final quoteAfter = line.indexOf(quotes, r.position.character);
-    //log("Quote before: $quoteBefore, Quote after: $quoteAfter");
+    final quoteBefore = line.substring(0, r.position.character - 1).lastIndexOf(quotes);
+    // final quoteAfter = line.indexOf(quotes, r.position.character - 1);
+    // log("Quote before: $quoteBefore, Quote after: $quoteAfter");
+    // log("Line: $line");
+    // log("Before: ${line.substring(0, r.position.character)}");
+    // log("After: ${line.substring(r.position.character)}");
     //We are ignoring the possibility of having a string that contains both single and double quotes
     //as any translation keys would probably not contain those
     //TODO: Robust string selection
 
-    if (quoteBefore != -1 && quoteAfter != -1) {
+    if (quoteBefore != -1) {
       final start = quoteBefore + 1;
-      final end = quoteAfter;
+      final end = r.position.character - 1;
       final key = line.substring(start, end);
       log("Suggestions for Key: $key");
       final completions = translationFiles.values
@@ -148,6 +152,12 @@ class EasyLocalizationAnalyzer {
           .map((key) => lsp.CompletionItem(
                 label: key,
                 kind: lsp.CompletionItemKind.Text,
+                textEdit: lsp.Either2.t2(lsp.TextEdit(
+                    range: lsp.Range(
+                      start: lsp.Position(line: r.position.line, character: start),
+                      end: lsp.Position(line: r.position.line, character: end),
+                    ),
+                    newText: key)),
               ))
           .toList();
       return lsp.CompletionList(isIncomplete: false, items: completions);

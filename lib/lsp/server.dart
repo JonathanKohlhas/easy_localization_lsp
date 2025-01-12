@@ -12,7 +12,6 @@ import 'package:easy_localization_lsp/analysis/analyzer.dart';
 import 'package:easy_localization_lsp/config/config.dart';
 import 'package:easy_localization_lsp/lsp/connection.dart';
 import 'package:easy_localization_lsp/protocol/labels_provider.dart';
-import 'package:easy_localization_lsp/protocol/progress.dart';
 import 'package:easy_localization_lsp/protocol/utils.dart';
 import 'package:easy_localization_lsp/util/utils.dart';
 import 'package:lsp_server/lsp_server.dart';
@@ -95,6 +94,7 @@ class EasyLocalizationLspServer {
 
   Future<void> _analyzeFile(String file, AnalysisContext context) async {
     await suspendToScheduler();
+    // _connection.log("Analyzing file: $file");
     try {
       final rootPath = context.contextRoot.root.path;
       final config = _configs[rootPath];
@@ -115,6 +115,7 @@ class EasyLocalizationLspServer {
         }
       } else if (config.isTranslationFile(file)) {
         _analyzer.analyzeTranslationFile(context, file);
+        _fileChangeController.add(_analyzer.filesWithTranslations);
       }
     } on InconsistentAnalysisException catch (e) {
       _connection.log("""
@@ -125,58 +126,30 @@ Assumed to be non-fatal, probably just running analysis on a file that has just 
     }
   }
 
-  Future<void> _analyzeFiles(List<String> files, AnalysisContext context,
-      {Either2<int, String>? token, bool reportPercentage = false}) async {
-    // token ??= await _createProgressToken();
-    _connection.sendProgressBegin(
-        token,
-        WorkDoneProgressBegin(
-          title: 'Analyzing files',
-          cancellable: false,
-          percentage: reportPercentage ? 0 : null,
-          message: "Easy Localization Analyzing files",
-        ));
+  Future<void> _startFileAnalysis() async {
+    List<String> files = List.from(_priorityFiles);
+    Completer<void> sleep = Completer();
 
-    List<String> jsonFiles = files.where((file) => file.endsWith('.json')).toList();
-    List<String> priorityFiles =
-        files.where((file) => _priorityFiles.contains(file) && !jsonFiles.contains(file)).toList();
-    List<String> otherFiles =
-        files.where((file) => !_priorityFiles.contains(file) && !jsonFiles.contains(file)).toList();
+    final subscription = _fileChangeController.stream.listen((newFiles) async {
+      files.addAll(newFiles.where((file) => !files.contains(file)));
+      sleep.complete();
+      sleep = Completer();
+    });
 
-    for (final (i, file) in jsonFiles.indexed) {
-      await _analyzeFile(file, context);
-      _connection.sendProgressReport(
-          token,
-          WorkDoneProgressReport(
-            cancellable: false,
-            percentage: ((i / files.length) * 100).round(),
-            message: "Easy Localization Analyzing files",
-          ));
+    while (!_connection.peer.isClosed) {
+      if (files.isEmpty) {
+        await sleep.future;
+      } else {
+        final fileToAnalyze = files.where((file) => file.endsWith(".json")).firstOrNull ??
+            files.where((file) => _priorityFiles.contains(file)).firstOrNull ??
+            files.first;
+
+        files.remove(fileToAnalyze);
+        await _analyzeFile(fileToAnalyze, _collection.contextFor(fileToAnalyze));
+      }
     }
 
-    for (final (i, file) in priorityFiles.indexed) {
-      await _analyzeFile(file, context);
-      _connection.sendProgressReport(
-          token,
-          WorkDoneProgressReport(
-            cancellable: false,
-            percentage: ((i + jsonFiles.length) / files.length * 100).round(),
-            message: "Easy Localization Analyzing files",
-          ));
-    }
-
-    for (final (i, file) in otherFiles.indexed) {
-      await _analyzeFile(file, context);
-      _connection.sendProgressReport(
-          token,
-          WorkDoneProgressReport(
-            cancellable: false,
-            percentage: ((i + jsonFiles.length + priorityFiles.length) / files.length * 100).round(),
-            message: "Easy Localization Analyzing files",
-          ));
-    }
-
-    _connection.sendProgressDone(token, WorkDoneProgressEnd(message: 'Analysis complete'));
+    await subscription.cancel();
   }
 
   Future<Either2<int, String>?> _createProgressToken() async {
@@ -229,7 +202,7 @@ Assumed to be non-fatal, probably just running analysis on a file that has just 
 
     // Determine which files need re-analysis
     for (final context in _collection.contexts) {
-      final affectedFilesInContext = affectedFiles.where(context.contextRoot.isAnalyzed).toList(growable: false);
+      final affectedFilesInContext = affectedFiles.where(context.contextRoot.isAnalyzed).toList();
 
       final translationFiles =
           files.where((file) => _configs[context.contextRoot.root.path]?.isTranslationFile(file) == true);
@@ -237,7 +210,7 @@ Assumed to be non-fatal, probably just running analysis on a file that has just 
         affectedFilesInContext.addAll(translationFiles);
       }
 
-      await _analyzeFiles(affectedFilesInContext, context);
+      _fileChangeController.add(affectedFilesInContext);
     }
   }
 
@@ -254,7 +227,7 @@ Assumed to be non-fatal, probably just running analysis on a file that has just 
   }
 
   Future<dynamic> _onDidChangeTextDocument(DidChangeTextDocumentParams params) async {
-    _connection.log("onDidChangeTextDocument: ${params.textDocument.uri.path}");
+    // _connection.log("onDidChangeTextDocument: ${params.textDocument.uri.path}");
     var contentChanges = params.contentChanges.map((content) {
       return content.map(
         (document) => TextDocumentContentChangeEvent2(text: document.text),
@@ -304,14 +277,14 @@ Assumed to be non-fatal, probably just running analysis on a file that has just 
     );
     _analyzer = EasyLocalizationAnalyzer(_collection, rootPaths, _connection.log);
 
-    Future.delayed(Duration.zero, () async {
-      _connection.log("Initializing analysis");
-      for (final context in _collection.contexts) {
-        final options = analysisOptionsFromFile(context);
-        _configs[context.contextRoot.root.path] = options ?? EasyLocalizationAnalysisOptions();
-        await _analyzeFiles(context.contextRoot.analyzedFiles().toList(), context);
-      }
-    });
+    _connection.log("Initializing analysis");
+    _startFileAnalysis();
+    for (final context in _collection.contexts) {
+      final options = analysisOptionsFromFile(context);
+      _configs[context.contextRoot.root.path] = options ?? EasyLocalizationAnalysisOptions();
+      _fileChangeController.add(context.contextRoot.analyzedFiles().toList());
+    }
+
     return InitializeResult(
       capabilities: ServerCapabilities(
           textDocumentSync: const Either2.t1(TextDocumentSyncKind.Full),

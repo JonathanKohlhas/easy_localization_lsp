@@ -2,12 +2,17 @@
   "name": "easy-localization-lsp",
   "displayName": "Easy Localization Lsp",
   "description": "LSP support for the flutter easy localization package",
-  "version": "0.0.1",
+  "version": "1.0.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/JonathanKohlhas/easy_localization_lsp"
+  },
   "engines": {
     "vscode": "^1.96.0"
   },
   "categories": [
-    "Other"
+    "Programming Languages",
+    "Visualization"
   ],
   "activationEvents": [
     "onLanguage:dart"

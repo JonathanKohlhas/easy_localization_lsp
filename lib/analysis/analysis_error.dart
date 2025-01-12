@@ -21,18 +21,31 @@ enum AnalysisErrorSeverity {
   }
 }
 
+enum AnalysisErrorCode {
+  unknown,
+  noSuchTranslation,
+  missingPluralTranslation,
+  missingGenderTranslation;
+
+  static AnalysisErrorCode fromString(String code) {
+    return AnalysisErrorCode.values.firstWhere((e) => e.name == code, orElse: () => AnalysisErrorCode.unknown);
+  }
+}
+
 class AnalysisError {
   final AnalysisErrorSeverity severity;
+  final AnalysisErrorCode code;
   final Location location;
   final String message;
 
-  AnalysisError(this.severity, this.location, this.message);
+  AnalysisError(this.severity, this.location, this.message, {this.code = AnalysisErrorCode.unknown});
 
   lsp.Diagnostic toLsp() {
     return lsp.Diagnostic(
       range: location.toLsp().range,
       severity: severity.toLsp(),
       message: message,
+      code: code.name,
     );
   }
 }

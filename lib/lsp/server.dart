@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:collection';
 import 'dart:io';
 
@@ -9,27 +10,43 @@ import 'package:analyzer/file_system/overlay_file_system.dart';
 import 'package:analyzer/file_system/physical_file_system.dart';
 import 'package:easy_localization_lsp/analysis/analyzer.dart';
 import 'package:easy_localization_lsp/config/config.dart';
+import 'package:easy_localization_lsp/protocol/labels_provider.dart';
 import 'package:lsp_server/lsp_server.dart';
 import 'package:uuid/v4.dart';
 
-class LSPServer {
-  late final Connection _connection;
-  late final OverlayResourceProvider _resourceProvider;
-  late final AnalysisContextCollection _collection;
-  final ListQueue<String> _priorityFiles = ListQueue();
-  late final EasyLocalizationAnalyzer _analyzer = EasyLocalizationAnalyzer(_log);
-  final Map<String, EasyLocalizationAnalysisOptions> _configs = {};
-  late final ClientCapabilities _clientCapabilities;
+abstract class ConnectionType {
+  factory ConnectionType.socket(int port) => SocketConnection(port);
 
+  factory ConnectionType.stdio() => StdioConnection();
+
+  FutureOr<Connection> initialize();
+}
+
+class DocumentPositionRequest {
+  DocumentPositionRequest(this.path, this.position, this.unit);
+
+  final String path;
+  final Position position;
+  final ResolvedUnitResult unit;
+}
+
+class EasyLocalizationLspServer {
+  EasyLocalizationLspServer(this.options);
+
+  final EasyLocalizationLspServerOptions options;
+
+  late final EasyLocalizationAnalyzer _analyzer;
+  late final ClientCapabilities _clientCapabilities;
+  late final AnalysisContextCollection _collection;
+  final Map<String, EasyLocalizationAnalysisOptions> _configs = {};
+  late final Connection _connection;
   int _overlayModificationStamp = 0;
+  final ListQueue<String> _priorityFiles = ListQueue();
+  late final OverlayResourceProvider _resourceProvider;
+  Socket? _socket;
 
   Future<void> start() async {
-    // _connection = Connection(stdin, stdout);
-    final socket = await Socket.connect('localhost', 54536);
-    _connection = Connection(
-      socket,
-      socket,
-    );
+    _connection = await options.connection.initialize();
 
     _connection.onInitialize(_onInitialize);
     _connection.onDidOpenTextDocument(_onDidOpenTextDocument);
@@ -50,10 +67,15 @@ class LSPServer {
       var renameParams = RenameParams.fromJson(params.value);
       return await _onRename(renameParams);
     });
+    _connection.onCodeAction(_onCodeAction);
+
     await _connection.listen();
+    if (_socket != null) {
+      await _socket!.close();
+    }
   }
 
-  String findSdkPath() {
+  String get _sdkPath {
     final sdkPath = Platform.environment['DART_SDK'];
     if (sdkPath != null) {
       return sdkPath;
@@ -77,137 +99,6 @@ class LSPServer {
     throw Exception("Could not find Dart SDK");
   }
 
-  Future<InitializeResult> _onInitialize(InitializeParams params) async {
-    _clientCapabilities = params.capabilities;
-    _resourceProvider = OverlayResourceProvider(PhysicalResourceProvider.INSTANCE);
-    _collection = AnalysisContextCollection(
-      includedPaths:
-          //[Directory.current.absolute.path],
-          params.workspaceFolders?.map((folder) => folder.uri.path).toList() ??
-              [params.rootUri?.path ?? params.rootPath ?? Directory.current.absolute.path],
-      resourceProvider: _resourceProvider,
-      sdkPath: findSdkPath(),
-    );
-
-    Future.delayed(Duration.zero, () async {
-      for (final context in _collection.contexts) {
-        final options = analysisOptionsFromFile(context);
-        _configs[context.contextRoot.root.path] = options ?? EasyLocalizationAnalysisOptions();
-        await _analyzeFiles(context.contextRoot.analyzedFiles().toList(), context);
-      }
-    });
-    return InitializeResult(
-      capabilities: ServerCapabilities(
-        textDocumentSync: const Either2.t1(TextDocumentSyncKind.Full),
-        declarationProvider: Either3.t1(true),
-        definitionProvider: Either2.t1(true),
-        referencesProvider: Either2.t1(true),
-        hoverProvider: Either2.t1(true),
-        completionProvider: CompletionOptions(
-          resolveProvider: false,
-          triggerCharacters: ['.', '"'],
-        ),
-        renameProvider: Either2.t1(true),
-      ),
-    );
-  }
-
-  void _showMessage(String message) {
-    _connection.sendNotification(
-      'window/showMessage',
-      ShowMessageParams(
-        message: message,
-        type: MessageType.Warning,
-      ).toJson(),
-    );
-  }
-
-  void _log(String message) {
-    _connection.sendNotification(
-      'window/logMessage',
-      LogMessageParams(
-        message: message,
-        type: MessageType.Info,
-      ).toJson(),
-    );
-  }
-
-  void _startProgress(Either2<int, String> token, WorkDoneProgressBegin begin) {
-    _connection.sendNotification('\$/progress', ProgressParams(token: token, value: begin).toJson());
-  }
-
-  void _reportProgress(Either2<int, String> token, WorkDoneProgressReport report) {
-    _connection.sendNotification('\$/progress', ProgressParams(token: token, value: report).toJson());
-  }
-
-  void _endProgress(Either2<int, String> token, WorkDoneProgressEnd end) {
-    _connection.sendNotification('\$/progress', ProgressParams(token: token, value: end).toJson());
-  }
-
-  Future<Either2<int, String>> _createProgressToken() async {
-    if (_clientCapabilities.window?.workDoneProgress == false) {
-      throw Exception("Client does not support progress reporting");
-    }
-    final token = Either2<int, String>.t2(UuidV4().generate());
-    await _connection.sendRequest('window/workDoneProgress/create', {
-      "token": token.toJson(),
-    });
-    return token;
-  }
-
-  Future<void> _analyzeFiles(List<String> files, AnalysisContext context) async {
-    final token = await _createProgressToken();
-    _startProgress(
-        token,
-        WorkDoneProgressBegin(
-          title: 'Analyzing files',
-          cancellable: false,
-          percentage: 0,
-          message: "Easy Localization Analyzing files",
-        ));
-
-    List<String> jsonFiles = files.where((file) => file.endsWith('.json')).toList();
-    List<String> priorityFiles =
-        files.where((file) => _priorityFiles.contains(file) && !jsonFiles.contains(file)).toList();
-    List<String> otherFiles =
-        files.where((file) => !_priorityFiles.contains(file) && !jsonFiles.contains(file)).toList();
-
-    for (final (i, file) in jsonFiles.indexed) {
-      await _analyzeFile(file, context);
-      _reportProgress(
-          token,
-          WorkDoneProgressReport(
-            cancellable: false,
-            percentage: ((i / files.length) * 100).round(),
-            message: "Easy Localization Analyzing files",
-          ));
-    }
-
-    for (final (i, file) in priorityFiles.indexed) {
-      await _analyzeFile(file, context);
-      _reportProgress(
-          token,
-          WorkDoneProgressReport(
-            cancellable: false,
-            percentage: ((i + jsonFiles.length) / files.length * 100).round(),
-            message: "Easy Localization Analyzing files",
-          ));
-    }
-
-    for (final (i, file) in otherFiles.indexed) {
-      await _analyzeFile(file, context);
-      _reportProgress(
-          token,
-          WorkDoneProgressReport(
-            cancellable: false,
-            percentage: ((i + jsonFiles.length + priorityFiles.length) / files.length * 100).round(),
-            message: "Easy Localization Analyzing files",
-          ));
-    }
-
-    _endProgress(token, WorkDoneProgressEnd(message: 'Analysis complete'));
-  }
-
   Future<void> _analyzeFile(String file, AnalysisContext context) async {
     try {
       final rootPath = context.contextRoot.root.path;
@@ -229,6 +120,12 @@ class LSPServer {
             uri: Uri.file(file),
           ),
         );
+
+        if (_clientCapabilities.experimental case {"supportsEasyLocalizationTranslationLabels": true}) {
+          final List<TranslationLabel> labels = _analyzer.getTranslationLabels(file);
+          _log("Sending translation labels for $file: ${labels.length}");
+          _connection.sendTranslationLabels(TranslationLabelNotification(file, labels));
+        }
       } else if (config.isTranslationFile(file)) {
         _analyzer.analyzeTranslationFile(context, file);
         final dartFiles = context.contextRoot.analyzedFiles().where((f) {
@@ -245,44 +142,91 @@ Assumed to be non-fatal, probably just running analysis on a file that has just 
     }
   }
 
-  Future<dynamic> _onDidOpenTextDocument(DidOpenTextDocumentParams params) async {
-    _resourceProvider.setOverlay(
-      params.textDocument.uri.path,
-      content: params.textDocument.text,
-      modificationStamp: _overlayModificationStamp++,
-    );
-    _priorityFiles.addFirst(params.textDocument.uri.path);
-    await _handleFileChange(params.textDocument.uri.path);
+  Future<void> _analyzeFiles(List<String> files, AnalysisContext context,
+      {Either2<int, String>? token, bool reportPercentage = false}) async {
+    // token ??= await _createProgressToken();
+    _sendProgressBegin(
+        token,
+        WorkDoneProgressBegin(
+          title: 'Analyzing files',
+          cancellable: false,
+          percentage: reportPercentage ? 0 : null,
+          message: "Easy Localization Analyzing files",
+        ));
+
+    List<String> jsonFiles = files.where((file) => file.endsWith('.json')).toList();
+    List<String> priorityFiles =
+        files.where((file) => _priorityFiles.contains(file) && !jsonFiles.contains(file)).toList();
+    List<String> otherFiles =
+        files.where((file) => !_priorityFiles.contains(file) && !jsonFiles.contains(file)).toList();
+
+    for (final (i, file) in jsonFiles.indexed) {
+      await _analyzeFile(file, context);
+      _sendProgressReport(
+          token,
+          WorkDoneProgressReport(
+            cancellable: false,
+            percentage: ((i / files.length) * 100).round(),
+            message: "Easy Localization Analyzing files",
+          ));
+    }
+
+    for (final (i, file) in priorityFiles.indexed) {
+      await _analyzeFile(file, context);
+      _sendProgressReport(
+          token,
+          WorkDoneProgressReport(
+            cancellable: false,
+            percentage: ((i + jsonFiles.length) / files.length * 100).round(),
+            message: "Easy Localization Analyzing files",
+          ));
+    }
+
+    for (final (i, file) in otherFiles.indexed) {
+      await _analyzeFile(file, context);
+      _sendProgressReport(
+          token,
+          WorkDoneProgressReport(
+            cancellable: false,
+            percentage: ((i + jsonFiles.length + priorityFiles.length) / files.length * 100).round(),
+            message: "Easy Localization Analyzing files",
+          ));
+    }
+
+    _sendProgressDone(token, WorkDoneProgressEnd(message: 'Analysis complete'));
   }
 
-  Future<dynamic> _onDidCloseTextDocument(DidCloseTextDocumentParams params) async {
-    _resourceProvider.removeOverlay(params.textDocument.uri.path);
-    _priorityFiles.remove(params.textDocument.uri.path);
-
-    await _handleFileChange(params.textDocument.uri.path);
-  }
-
-  Future<dynamic> _onDidChangeTextDocument(DidChangeTextDocumentParams params) async {
-    //_showMessage("Document changed ${params.textDocument.uri.path}");
-    /*  var contentChanges = params.contentChanges
-        .map((e) => TextDocumentContentChangeEvent2.fromJson(
-            e.toJson() as Map<String, dynamic>))
-        .toList();*/
-
-    var contentChanges = params.contentChanges.map((content) {
-      return content.map(
-        (document) => TextDocumentContentChangeEvent2(text: document.text),
-        (document) => document,
-      );
+  Future<Either2<int, String>?> _createProgressToken() async {
+    if (_clientCapabilities.window?.workDoneProgress == false) {
+      return null;
+    }
+    final token = Either2<int, String>.t2(UuidV4().generate());
+    await _connection.sendRequest('window/workDoneProgress/create', {
+      "token": token.toJson(),
     });
+    return token;
+  }
 
-    _resourceProvider.setOverlay(
-      params.textDocument.uri.path,
-      content: contentChanges.first.text,
-      modificationStamp: _overlayModificationStamp++,
-    );
+  Future<Either3<Location, List<Location>, List<LocationLink>>?> _getDeclaration(
+      TextDocumentPositionParams param) async {
+    final unit = await _getResolvedUnit(param.textDocument.uri.path);
+    final offset = unit.lineInfo.getOffsetOfLine(param.position.line) + param.position.character;
+    final List<Location> locations = _analyzer.getDeclaration(param.textDocument.uri.path, offset);
 
-    await _handleFileChange(params.textDocument.uri.path);
+    return Either3.t2(locations);
+  }
+
+  Future<List<Location>> _getReferences(ReferenceParams params) async {
+    return _analyzer.getReferences(params);
+  }
+
+  Future<ResolvedUnitResult> _getResolvedUnit(String path) async {
+    final context = _collection.contextFor(path);
+    final result = await context.currentSession.getResolvedUnit(path);
+    if (result is ResolvedUnitResult) {
+      return result;
+    }
+    throw Exception("Could not get resolved unit for $path");
   }
 
   Future<void> _handleFileChange(String file) async {
@@ -311,34 +255,102 @@ Assumed to be non-fatal, probably just running analysis on a file that has just 
     }
   }
 
-  Future<ResolvedUnitResult> getResolvedUnit(String path) async {
-    final context = _collection.contextFor(path);
-    final result = await context.currentSession.getResolvedUnit(path);
-    if (result is ResolvedUnitResult) {
-      return result;
-    }
-    throw Exception("Could not get resolved unit for $path");
+  void _log(String message) {
+    _connection.sendNotification(
+      'window/logMessage',
+      LogMessageParams(
+        message: message,
+        type: MessageType.Info,
+      ).toJson(),
+    );
   }
 
-  Future<Either3<Location, List<Location>, List<LocationLink>>?> _getDeclaration(
-      TextDocumentPositionParams param) async {
-    final unit = await getResolvedUnit(param.textDocument.uri.path);
-    final offset = unit.lineInfo.getOffsetOfLine(param.position.line) + param.position.character;
-    final List<Location> locations = _analyzer.getDeclaration(param.textDocument.uri.path, offset);
-
-    return Either3.t2(locations);
-  }
-
-  Future<Hover> _onHover(TextDocumentPositionParams params) async {
-    return _analyzer.getHoverInfo(params) ?? Hover(contents: Either2.t2(""));
+  Future<List<CodeAction>> _onCodeAction(CodeActionParams params) {
+    return _analyzer.getCodeActions(params);
   }
 
   Future<CompletionList> _onCompletion(TextDocumentPositionParams params) async {
     return _analyzer.getCompletion(DocumentPositionRequest(
       params.textDocument.uri.path,
       params.position,
-      await getResolvedUnit(params.textDocument.uri.path),
+      await _getResolvedUnit(params.textDocument.uri.path),
     ));
+  }
+
+  Future<dynamic> _onDidChangeTextDocument(DidChangeTextDocumentParams params) async {
+    var contentChanges = params.contentChanges.map((content) {
+      return content.map(
+        (document) => TextDocumentContentChangeEvent2(text: document.text),
+        (document) => document,
+      );
+    });
+
+    _resourceProvider.setOverlay(
+      params.textDocument.uri.path,
+      content: contentChanges.first.text,
+      modificationStamp: _overlayModificationStamp++,
+    );
+
+    await _handleFileChange(params.textDocument.uri.path);
+  }
+
+  Future<dynamic> _onDidCloseTextDocument(DidCloseTextDocumentParams params) async {
+    _resourceProvider.removeOverlay(params.textDocument.uri.path);
+    _priorityFiles.remove(params.textDocument.uri.path);
+
+    await _handleFileChange(params.textDocument.uri.path);
+  }
+
+  Future<dynamic> _onDidOpenTextDocument(DidOpenTextDocumentParams params) async {
+    _resourceProvider.setOverlay(
+      params.textDocument.uri.path,
+      content: params.textDocument.text,
+      modificationStamp: _overlayModificationStamp++,
+    );
+    _priorityFiles.addFirst(params.textDocument.uri.path);
+    await _handleFileChange(params.textDocument.uri.path);
+  }
+
+  Future<Hover> _onHover(TextDocumentPositionParams params) async {
+    return _analyzer.getHoverInfo(params) ?? Hover(contents: Either2.t2(""));
+  }
+
+  Future<InitializeResult> _onInitialize(InitializeParams params) async {
+    _clientCapabilities = params.capabilities;
+    _resourceProvider = OverlayResourceProvider(PhysicalResourceProvider.INSTANCE);
+    final rootPaths = params.workspaceFolders?.map((folder) => folder.uri.path).toList() ??
+        [params.rootUri?.path ?? params.rootPath ?? Directory.current.absolute.path];
+    _collection = AnalysisContextCollection(
+      includedPaths: rootPaths,
+      resourceProvider: _resourceProvider,
+      sdkPath: _sdkPath,
+    );
+    _analyzer = EasyLocalizationAnalyzer(_collection, rootPaths, _log);
+
+    Future.delayed(Duration.zero, () async {
+      for (final context in _collection.contexts) {
+        final options = analysisOptionsFromFile(context);
+        _configs[context.contextRoot.root.path] = options ?? EasyLocalizationAnalysisOptions();
+        await _analyzeFiles(context.contextRoot.analyzedFiles().toList(), context);
+      }
+    });
+    return InitializeResult(
+      capabilities: ServerCapabilities(
+          textDocumentSync: const Either2.t1(TextDocumentSyncKind.Full),
+          declarationProvider: Either3.t1(true),
+          definitionProvider: Either2.t1(true),
+          referencesProvider: Either2.t1(true),
+          hoverProvider: Either2.t1(true),
+          completionProvider: CompletionOptions(
+            resolveProvider: false,
+            triggerCharacters: ['.', '"'],
+          ),
+          renameProvider: Either2.t1(true),
+          codeActionProvider: Either2.t1(true),
+          experimental: {
+            'easyLocalizationTranslationLabelsProvider': true,
+          }),
+    );
   }
 
   Future<WorkspaceEdit?> _onRename(RenameParams params) async {
@@ -353,15 +365,57 @@ Assumed to be non-fatal, probably just running analysis on a file that has just 
     return _analyzer.prepareRename(params);
   }
 
-  Future<List<Location>> _getReferences(ReferenceParams params) async {
-    return _analyzer.getReferences(params);
+  void _sendProgressBegin(Either2<int, String>? token, WorkDoneProgressBegin begin) {
+    if (token == null) return;
+    _connection.sendNotification('\$/progress', ProgressParams(token: token, value: begin).toJson());
+  }
+
+  void _sendProgressDone(Either2<int, String>? token, WorkDoneProgressEnd end) {
+    if (token == null) return;
+    _connection.sendNotification('\$/progress', ProgressParams(token: token, value: end).toJson());
+  }
+
+  void _sendProgressReport(Either2<int, String>? token, WorkDoneProgressReport report) {
+    if (token == null) return;
+    _connection.sendNotification('\$/progress', ProgressParams(token: token, value: report).toJson());
+  }
+
+  void _showMessage(String message) {
+    _connection.sendNotification(
+      'window/showMessage',
+      ShowMessageParams(
+        message: message,
+        type: MessageType.Info,
+      ).toJson(),
+    );
   }
 }
 
-class DocumentPositionRequest {
-  final String path;
-  final Position position;
-  final ResolvedUnitResult unit;
+class EasyLocalizationLspServerOptions {
+  EasyLocalizationLspServerOptions({
+    ConnectionType? connection,
+  }) : connection = connection ?? ConnectionType.stdio();
 
-  DocumentPositionRequest(this.path, this.position, this.unit);
+  final ConnectionType connection;
+}
+
+class SocketConnection implements ConnectionType {
+  const SocketConnection(this.port);
+
+  final int port;
+
+  @override
+  Future<Connection> initialize() async {
+    final socket = await Socket.connect(InternetAddress.loopbackIPv4, port);
+    return Connection(socket, socket);
+  }
+}
+
+class StdioConnection implements ConnectionType {
+  const StdioConnection();
+
+  @override
+  Connection initialize() {
+    return Connection(stdin, stdout);
+  }
 }

@@ -1,4 +1,3 @@
-import 'package:easy_localization_lsp/json/parser.dart';
 import 'package:easy_localization_lsp/util/location.dart';
 
 class JsonToken {
@@ -72,33 +71,27 @@ class JsonTokenizer {
 
     switch (char) {
       case '{':
-        final token = JsonToken(JsonTokenType.leftCurlyBracket, '{',
-            Location(sourceName, index, 1, line, column));
+        final token = JsonToken(JsonTokenType.leftCurlyBracket, '{', Location(sourceName, index, 1, line, column));
         advance();
         return token;
       case '}':
-        final token = JsonToken(JsonTokenType.rightCurlyBracket, '}',
-            Location(sourceName, index, 1, line, column));
+        final token = JsonToken(JsonTokenType.rightCurlyBracket, '}', Location(sourceName, index, 1, line, column));
         advance();
         return token;
       case '[':
-        final token = JsonToken(JsonTokenType.leftSquareBracket, '[',
-            Location(sourceName, index, 1, line, column));
+        final token = JsonToken(JsonTokenType.leftSquareBracket, '[', Location(sourceName, index, 1, line, column));
         advance();
         return token;
       case ']':
-        final token = JsonToken(JsonTokenType.rightSquareBracket, ']',
-            Location(sourceName, index, 1, line, column));
+        final token = JsonToken(JsonTokenType.rightSquareBracket, ']', Location(sourceName, index, 1, line, column));
         advance();
         return token;
       case ',':
-        final token = JsonToken(JsonTokenType.comma, ',',
-            Location(sourceName, index, 1, line, column));
+        final token = JsonToken(JsonTokenType.comma, ',', Location(sourceName, index, 1, line, column));
         advance();
         return token;
       case ':':
-        final token = JsonToken(JsonTokenType.colon, ':',
-            Location(sourceName, index, 1, line, column));
+        final token = JsonToken(JsonTokenType.colon, ':', Location(sourceName, index, 1, line, column));
         advance();
         return token;
       case '"':
@@ -130,8 +123,7 @@ class JsonTokenizer {
         final token = JsonToken(
             JsonTokenType.string,
             buffer.toString(),
-            Location(sourceName, startIndex, index - startIndex, startLine,
-                startColumn,
+            Location(sourceName, startIndex, index - startIndex, startLine, startColumn,
                 endLine: line, endColumn: column));
         advance();
         return token;
@@ -207,11 +199,8 @@ class JsonTokenizer {
 
     index += 3;
 
-    return JsonToken(
-        JsonTokenType.trueValue,
-        'true',
-        Location(sourceName, startIndex, 4, startLine, startColumn,
-            endLine: line, endColumn: column));
+    return JsonToken(JsonTokenType.trueValue, 'true',
+        Location(sourceName, startIndex, 4, startLine, startColumn, endLine: line, endColumn: column));
   }
 
   JsonToken _readFalse() {
@@ -227,11 +216,8 @@ class JsonTokenizer {
 
     index += 4;
 
-    return JsonToken(
-        JsonTokenType.falseValue,
-        'false',
-        Location(sourceName, startIndex, 5, startLine, startColumn,
-            endLine: line, endColumn: column));
+    return JsonToken(JsonTokenType.falseValue, 'false',
+        Location(sourceName, startIndex, 5, startLine, startColumn, endLine: line, endColumn: column));
   }
 
   JsonToken _readNull() {
@@ -247,11 +233,8 @@ class JsonTokenizer {
 
     index += 3;
 
-    return JsonToken(
-        JsonTokenType.nullValue,
-        'null',
-        Location(sourceName, startIndex, 4, startLine, startColumn,
-            endLine: line, endColumn: column));
+    return JsonToken(JsonTokenType.nullValue, 'null',
+        Location(sourceName, startIndex, 4, startLine, startColumn, endLine: line, endColumn: column));
   }
 
   JsonToken _readNumber() {
@@ -286,12 +269,8 @@ class JsonTokenizer {
       advance();
     }
 
-    return JsonToken(
-        JsonTokenType.number,
-        buffer.toString(),
-        Location(
-            sourceName, startIndex, index - startIndex, startLine, startColumn,
-            endLine: line, endColumn: column));
+    return JsonToken(JsonTokenType.number, buffer.toString(),
+        Location(sourceName, startIndex, index - startIndex, startLine, startColumn, endLine: line, endColumn: column));
   }
 
   JsonToken peek() {

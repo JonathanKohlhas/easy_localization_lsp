@@ -1,11 +1,18 @@
+import 'dart:convert';
+
 import 'package:analyzer/dart/analysis/analysis_context.dart';
+import 'package:analyzer/dart/analysis/analysis_context_collection.dart';
 import 'package:analyzer/dart/analysis/results.dart';
+import 'package:analyzer/dart/ast/ast.dart';
+import 'package:analyzer/dart/ast/visitor.dart';
+import 'package:analyzer/source/line_info.dart';
 import 'package:easy_localization_lsp/analysis/analysis_error.dart';
 import 'package:easy_localization_lsp/analysis/translation_call.dart';
 import 'package:easy_localization_lsp/analysis/translation_file.dart';
 import 'package:easy_localization_lsp/analysis/translation_visitor.dart';
 import 'package:easy_localization_lsp/easy_localization_lsp.dart';
 import 'package:easy_localization_lsp/json/parser.dart';
+import 'package:easy_localization_lsp/protocol/labels_provider.dart';
 import 'package:easy_localization_lsp/util/location.dart';
 import 'package:lsp_server/lsp_server.dart' as lsp;
 
@@ -14,8 +21,10 @@ class EasyLocalizationAnalyzer {
   Map<String, List<ResolvedTranslationCall>> translationCallsByFile = {};
 
   final void Function(String) log;
+  final AnalysisContextCollection _collection;
+  final List<String> rootPaths;
 
-  EasyLocalizationAnalyzer(this.log);
+  EasyLocalizationAnalyzer(this._collection, this.rootPaths, this.log);
 
   List<String> get filesWithUnresolvedTranslations => translationCallsByFile.entries
       .where((entry) => entry.value.any((call) => !call.isValid))
@@ -103,7 +112,7 @@ class EasyLocalizationAnalyzer {
       return null;
     }
 
-    var text = "";
+    var text = [];
     for (final translation in overlappingCall.translations) {
       final String value;
       if (translation is JsonLocationString) {
@@ -111,11 +120,22 @@ class EasyLocalizationAnalyzer {
       } else {
         continue;
       }
-
-      text += "Translation: $value\n";
+      //get the closest root path
+      final rootPath = rootPaths.reduce((value, element) {
+        final commonPrefixLengthValue = value.commonPrefixLength(translation.location.file);
+        final commonPrefixLengthElement = element.commonPrefixLength(translation.location.file);
+        return commonPrefixLengthValue > commonPrefixLengthElement ? value : element;
+      });
+      //remove the root path from the file path
+      final relativePath = translation.location.file.replaceFirst(rootPath, "");
+      text.add("Translation: $value (File: $relativePath)");
     }
 
-    return lsp.Hover(contents: lsp.Either2.t2(text), range: overlappingCall.location.toLsp().range);
+    final content = lsp.MarkupContent(
+      kind: lsp.MarkupKind.Markdown,
+      value: text.join("\n\n"),
+    );
+    return lsp.Hover(contents: lsp.Either2.t1(content), range: overlappingCall.location.toLsp().range);
   }
 
   lsp.CompletionList getCompletion(DocumentPositionRequest r) {
@@ -191,19 +211,17 @@ class EasyLocalizationAnalyzer {
   Future<RenameResponse?> rename(lsp.RenameParams params) async {
     if (params.textDocument.uri.path.endsWith(".json")) {
       final affectedFiles = <String>{params.textDocument.uri.path};
+
       final translationFile = translationFiles[params.textDocument.uri.path];
       if (translationFile == null) return null;
-      final key = translationFile
-          .getFlatKeys()
-          .where((k) => k.entry.key.location.toLsp().range.contains(params.position))
-          .firstOrNull;
+
+      FlatKey? key = findTranslationKeyByRange(translationFile, params);
       if (key == null) return null;
+
       final range = key.entry.key.location.toLsp().range;
       final onlyText = lsp.Range(
           start: lsp.Position(line: range.start.line, character: range.start.character + 1),
           end: lsp.Position(line: range.end.line, character: range.end.character));
-      // final Map<Uri, List<lsp.TextEdit>> changes = {};
-      // changes[params.textDocument.uri] = [lsp.TextEdit(range: onlyText, newText: params.newName)];
       final keyParts = key.fullKey.split(".");
       final newFullKey = [...keyParts.sublist(0, keyParts.length - 1), params.newName].join(".");
 
@@ -213,7 +231,11 @@ class EasyLocalizationAnalyzer {
 
       final allEdits = translationCallsByFile.values
           .expand((values) => values)
-          .where((call) => call.translationKey == key.fullKey)
+          .where(
+            // TODO(JonathanKohlhas): This is not a clean way to find all the calls that reference the key
+            // see doc/rename.md for more
+            (call) => call.translationKey == key.fullKey,
+          )
           .map((call) {
         final callRange = call.location.toLsp().range;
         final stringLength = call.invocation.target!.length;
@@ -237,56 +259,163 @@ class EasyLocalizationAnalyzer {
     return null;
   }
 
-/*
-  @override
-  void computeNavigation(
-      NavigationRequest request, NavigationCollector collector) {
-    if (request is EasyLocalizationDartNavigationRequest) {
-      goToDeclaration(request, collector);
-    }
+  FlatKey? findTranslationKeyByRange(TranslationFile translationFile, lsp.RenameParams params) {
+    final key = translationFile
+        .getFlatKeys()
+        .where((k) => k.entry.key.location.toLsp().range.contains(params.position))
+        .firstOrNull;
+    return key;
   }
 
-  void goToDeclaration(EasyLocalizationDartNavigationRequest request,
-      NavigationCollector collector) {
-    var calls = translationCallsByFile[request.path];
-    if (calls == null) {
-      return;
+  List<TranslationLabel> getTranslationLabels(String file) {
+    final translationCalls = translationCallsByFile[file];
+    if (translationCalls == null) {
+      return [];
+    }
+    final labels = translationCalls
+        .where((call) => call.isValid)
+        .map((call) {
+          final closestTranslation = call.closestTranslation(file);
+          if (closestTranslation == null) {
+            return null;
+          }
+          final label = jsonEncode(closestTranslation.accept(JsonValueBuilder()));
+          return TranslationLabel(label, call.location.toLsp().range);
+        })
+        .whereType<TranslationLabel>()
+        .toList();
+
+    return labels;
+  }
+
+  Future<List<lsp.CodeAction>> getCodeActions(lsp.CodeActionParams params) async {
+    ///TODO:
+    /// Possible code actions:
+    /// - Add missing translation (Quick Fix)
+    /// - Rename key to similar existing key (Quick Fix)
+    /// - Convert string to translation key (Refactor)
+    final actions = <lsp.CodeAction?>[];
+
+    if (params.context.diagnostics.isNotEmpty) {
+      actions.addAll(_tryAddMissingTranslation(params));
+    }
+    return actions.whereType<lsp.CodeAction>().toList();
+  }
+
+  List<lsp.CodeAction> _tryAddMissingTranslation(lsp.CodeActionParams params) {
+    return params.context.diagnostics
+        .where((diagnostic) => diagnostic.code == AnalysisErrorCode.noSuchTranslation.name)
+        .map((diagnostic) {
+          final (range, selectedString) =
+              getSelectedStringLiteralByRange(params.textDocument.uri.path, diagnostic.range) ?? (null, null);
+          if (range == null ||
+              selectedString == null ||
+              selectedString.stringValue == null ||
+              selectedString.stringValue!.isEmpty) {
+            return null;
+          }
+          final title = "Add missing translation";
+          return lsp.CodeAction(
+            title: title,
+            kind: lsp.CodeActionKind.QuickFix,
+            command:
+                // TODO(JonathanKohlhas): Define a way to handle the command api
+                // maybe a way to register commands to the analyzer
+                // could also do this for the features in general
+                lsp.Command(
+              command: "addTranslation",
+              title: title,
+              arguments: [
+                params.textDocument.uri.toString(),
+                range.toJson(),
+                selectedString.stringValue,
+              ],
+            ),
+          );
+        })
+        .whereType<lsp.CodeAction>()
+        .toList();
+
+    // if (missingTranslation == null) {
+    //   return null;
+    // }
+    // final title = "Add missing translation";
+    // final edit = lsp.WorkspaceEdit(changes: {
+    //   Uri.parse(params.textDocument.uri): [lsp.TextEdit(range: range, newText: "\"${selectedString.stringValue}\"")]
+    // });
+    // return lsp.CodeAction(
+    //   title: title,
+    //   kind: lsp.CodeActionKind.QuickFix,
+    //   diagnostics: [missingTranslation],
+    //   edit: edit,
+    // );
+  }
+
+  (lsp.Range, SimpleStringLiteral)? getSelectedStringLiteralByRange(String path, lsp.Range selection) {
+    final unit = _collection.contextFor(path).currentSession.getParsedUnit(path);
+    if (unit is! ParsedUnitResult) {
+      return null;
+    }
+    final lineInfo = unit.lineInfo;
+    final (:offset, :length) = rangeToSelection(lineInfo, selection);
+
+    final selectedString = getSelectedStringLiteral(unit.unit, offset, length);
+    if (selectedString == null) {
+      return null;
     }
 
-    final overlappingCalls = calls.where((call) =>
-        call.invocation.offset <= request.offset + request.length &&
-        request.offset <= call.invocation.end);
+    final range = selectionToRange(lineInfo, selectedString.offset, selectedString.length);
+    return (range, selectedString);
+  }
 
-    for (final overlappingCall in overlappingCalls) {
-      for (final translation in overlappingCall.translations) {
-        collector.addRegion(
-          overlappingCall.invocation.offset,
-          overlappingCall.invocation.length,
-          ElementKind.UNKNOWN,
-          translation.location,
-        );
+  SimpleStringLiteral? getSelectedStringLiteral(CompilationUnit unit, int offset, int length) {
+    final visitor = SelectedStringVisitor(offset, length);
+    unit.accept(visitor);
+    final selectedString = visitor.selectedString;
+    return selectedString;
+  }
+
+  ({int offset, int length}) rangeToSelection(LineInfo lineInfo, lsp.Range range) {
+    final offset = lineInfo.getOffsetOfLine(range.start.line) + range.start.character;
+    final offsetEnd = lineInfo.getOffsetOfLine(range.end.line) + range.end.character;
+    final length = offsetEnd - offset;
+    return (offset: offset, length: length);
+  }
+
+  lsp.Range selectionToRange(LineInfo lineInfo, int offset, int length) {
+    final start = lineInfo.getLocation(offset);
+    final end = lineInfo.getLocation(offset + length);
+    return lsp.Range(
+      start: lsp.Position(line: start.lineNumber, character: start.columnNumber),
+      end: lsp.Position(line: end.lineNumber, character: end.columnNumber),
+    );
+  }
+
+  TranslationFile getClosestTranslationFile(String path) {
+    final rootPath = rootPaths.reduce((value, element) {
+      final commonPrefixLengthValue = value.commonPrefixLength(path);
+      final commonPrefixLengthElement = element.commonPrefixLength(path);
+      return commonPrefixLengthValue > commonPrefixLengthElement ? value : element;
+    });
+    return translationFiles[rootPath]!;
+  }
+
+  void addKeyToTranslationFile(Map<String, dynamic> jsonTranslation, String key, String value) {
+    final parts = key.split(".");
+    void addKeyHelper(Map<String, dynamic> json, List<String> parts, String value) {
+      if (parts.length == 1) {
+        json[parts.first] = value;
+      } else {
+        final part = parts.first;
+        if (!json.containsKey(part)) {
+          json[part] = {};
+        }
+        addKeyHelper(json[part], parts.sublist(1), value);
       }
     }
-  }*/
 
-  // @override
-  // Future<void> computeSuggestions(covariant CompletionRequest request, CompletionCollector collector) async {
-  //   if (request is EasyLocalizationDartCompletionRequest) {
-  //     for (final file in translationFiles.values) {
-  //       for (final key in file.keys) {
-  //         collector.addSuggestion(CompletionSuggestion(
-  //           CompletionSuggestionKind.IDENTIFIER,
-  //           100,
-  //           key,
-  //           request.offset,
-  //           key.length,
-  //           false,
-  //           false,
-  //         ));
-  //       }
-  //     }
-  //   }
-  // }
+    addKeyHelper(jsonTranslation, parts, value);
+  }
 }
 
 class RenameResponse {
@@ -294,4 +423,26 @@ class RenameResponse {
   final List<String> affectedFiles;
 
   RenameResponse(this.edit, this.affectedFiles);
+}
+
+class SelectedStringVisitor extends GeneralizingAstVisitor<void> {
+  SimpleStringLiteral? selectedString;
+  final int offset;
+  final int length;
+
+  SelectedStringVisitor(this.offset, this.length);
+
+  @override
+  void visitStringLiteral(StringLiteral node) {
+    final start = node.offset;
+    final end = node.end;
+    if (node is SimpleStringLiteral && rangeOverlaps(start, end)) {
+      selectedString = node;
+    }
+    super.visitStringLiteral(node);
+  }
+
+  bool rangeOverlaps(int start, int end) {
+    return (start <= offset && end >= offset) || (start <= offset + length && end >= offset + length);
+  }
 }

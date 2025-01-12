@@ -1,6 +1,5 @@
-import 'package:analyzer/dart/ast/visitor.dart';
 import 'package:analyzer/dart/ast/ast.dart';
-import 'package:easy_localization_lsp/analysis/translation_call.dart';
+import 'package:analyzer/dart/ast/visitor.dart';
 
 class TranslationVisitor extends GeneralizingAstVisitor<void> {
   List<MethodInvocation> list = [];

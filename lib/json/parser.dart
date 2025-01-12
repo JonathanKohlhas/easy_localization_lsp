@@ -4,6 +4,10 @@ import 'package:easy_localization_lsp/util/location.dart';
 sealed class JsonLocationValue {
   Location get location;
   T accept<T>(JsonLocationValueVisitor<T> visitor);
+  bool contains(JsonLocationValue value);
+  dynamic toJson() {
+    return accept(JsonValueBuilder());
+  }
 }
 
 class JsonLocationMapEntry {
@@ -27,6 +31,24 @@ class JsonLocationMap extends JsonLocationValue {
   T accept<T>(JsonLocationValueVisitor<T> visitor) {
     return visitor.visitMap(this);
   }
+
+  @override
+  bool contains(JsonLocationValue value) {
+    if (value == this) {
+      return true;
+    }
+    return this.value.values.any((entry) => entry.value.contains(value));
+  }
+
+  @override
+  bool operator ==(Object other) {
+    if (identical(this, other)) return true;
+
+    return other is JsonLocationMap && other.value == value && other.location == location;
+  }
+
+  @override
+  int get hashCode => value.hashCode ^ location.hashCode;
 }
 
 class JsonLocationList extends JsonLocationValue {
@@ -43,6 +65,24 @@ class JsonLocationList extends JsonLocationValue {
   T accept<T>(JsonLocationValueVisitor<T> visitor) {
     return visitor.visitList(this);
   }
+
+  @override
+  bool contains(JsonLocationValue value) {
+    if (value == this) {
+      return true;
+    }
+    return this.value.any((element) => element.contains(value));
+  }
+
+  @override
+  bool operator ==(Object other) {
+    if (identical(this, other)) return true;
+
+    return other is JsonLocationList && other.value == value && other.location == location;
+  }
+
+  @override
+  int get hashCode => value.hashCode ^ location.hashCode;
 }
 
 class JsonLocationString extends JsonLocationValue {
@@ -64,13 +104,16 @@ class JsonLocationString extends JsonLocationValue {
   bool operator ==(Object other) {
     if (identical(this, other)) return true;
 
-    return other is JsonLocationString &&
-        other.value == value &&
-        other.location == location;
+    return other is JsonLocationString && other.value == value && other.location == location;
   }
 
   @override
   int get hashCode => value.hashCode ^ location.hashCode;
+
+  @override
+  bool contains(JsonLocationValue value) {
+    return value == this;
+  }
 }
 
 class JsonLocationNumber extends JsonLocationValue {
@@ -86,6 +129,21 @@ class JsonLocationNumber extends JsonLocationValue {
   @override
   T accept<T>(JsonLocationValueVisitor<T> visitor) {
     return visitor.visitNumber(this);
+  }
+
+  @override
+  bool operator ==(Object other) {
+    if (identical(this, other)) return true;
+
+    return other is JsonLocationNumber && other.value == value && other.location == location;
+  }
+
+  @override
+  int get hashCode => value.hashCode ^ location.hashCode;
+
+  @override
+  bool contains(JsonLocationValue value) {
+    return value == this;
   }
 }
 
@@ -103,6 +161,21 @@ class JsonLocationBool extends JsonLocationValue {
   T accept<T>(JsonLocationValueVisitor<T> visitor) {
     return visitor.visitBool(this);
   }
+
+  @override
+  bool operator ==(Object other) {
+    if (identical(this, other)) return true;
+
+    return other is JsonLocationBool && other.value == value && other.location == location;
+  }
+
+  @override
+  int get hashCode => value.hashCode ^ location.hashCode;
+
+  @override
+  bool contains(JsonLocationValue value) {
+    return value == this;
+  }
 }
 
 class JsonLocationNull extends JsonLocationValue {
@@ -118,6 +191,21 @@ class JsonLocationNull extends JsonLocationValue {
   T accept<T>(JsonLocationValueVisitor<T> visitor) {
     return visitor.visitNull(this);
   }
+
+  @override
+  bool operator ==(Object other) {
+    if (identical(this, other)) return true;
+
+    return other is JsonLocationNull && other.location == location;
+  }
+
+  @override
+  int get hashCode => location.hashCode;
+
+  @override
+  bool contains(JsonLocationValue value) {
+    return value == this;
+  }
 }
 
 abstract class JsonLocationValueVisitor<T> {
@@ -132,8 +220,7 @@ abstract class JsonLocationValueVisitor<T> {
 class JsonParser {
   final JsonTokenizer tokenizer;
 
-  JsonParser(String source, {String sourceName = "source"})
-      : tokenizer = JsonTokenizer(source, sourceName: sourceName);
+  JsonParser(String source, {String sourceName = "source"}) : tokenizer = JsonTokenizer(source, sourceName: sourceName);
 
   JsonLocationValue parse() {
     final token = tokenizer.peek();
@@ -237,8 +324,7 @@ class JsonParser {
   }
 
   JsonLocationBool _parseBool(bool value) {
-    final token =
-        _consume(value ? JsonTokenType.trueValue : JsonTokenType.falseValue);
+    final token = _consume(value ? JsonTokenType.trueValue : JsonTokenType.falseValue);
     return JsonLocationBool(value, token.location);
   }
 

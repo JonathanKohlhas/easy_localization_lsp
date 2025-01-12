@@ -11,8 +11,7 @@ class TranslationCall {
   TranslationCall(this.invocation, this.location);
 
   String? get translationKey => switch (invocation) {
-        MethodInvocation(target: SimpleStringLiteral(value: final value)) =>
-          value,
+        MethodInvocation(target: SimpleStringLiteral(value: final value)) => value,
         // TODO(JonathanKohlhas): Support method invocations that contain string interpolation
         _ => null,
       };
@@ -20,10 +19,7 @@ class TranslationCall {
   bool get hasGender => invocation.argumentList.arguments
       .where(
         (arg) => switch (arg) {
-          NamedExpression(
-            name: Label(label: SimpleIdentifier(name: "gender"))
-          ) =>
-            true,
+          NamedExpression(name: Label(label: SimpleIdentifier(name: "gender"))) => true,
           _ => false,
         },
       )
@@ -54,4 +50,27 @@ class ResolvedTranslationCall extends TranslationCall {
   final List<JsonLocationValue> translations;
 
   bool get isValid => translations.isNotEmpty;
+
+  JsonLocationValue? closestTranslation(String file) {
+    if (translations.isEmpty) {
+      return null;
+    }
+    return translations.reduce(
+      (value, element) {
+        int commonPrefixLengthValue = value.location.file.commonPrefixLength(file);
+        int commonPrefixLengthElement = element.location.file.commonPrefixLength(file);
+        return commonPrefixLengthValue > commonPrefixLengthElement ? value : element;
+      },
+    );
+  }
+}
+
+extension CommonPrefixLengthString on String {
+  int commonPrefixLength(String other) {
+    int i = 0;
+    while (i < length && i < other.length && this[i] == other[i]) {
+      i++;
+    }
+    return i;
+  }
 }

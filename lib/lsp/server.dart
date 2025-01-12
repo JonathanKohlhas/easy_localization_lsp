@@ -11,6 +11,8 @@ import 'package:analyzer/file_system/physical_file_system.dart';
 import 'package:easy_localization_lsp/analysis/analyzer.dart';
 import 'package:easy_localization_lsp/config/config.dart';
 import 'package:easy_localization_lsp/protocol/labels_provider.dart';
+import 'package:easy_localization_lsp/protocol/progress.dart';
+import 'package:easy_localization_lsp/protocol/utils.dart';
 import 'package:lsp_server/lsp_server.dart';
 import 'package:uuid/v4.dart';
 
@@ -67,7 +69,6 @@ class EasyLocalizationLspServer {
       var renameParams = RenameParams.fromJson(params.value);
       return await _onRename(renameParams);
     });
-    _connection.onCodeAction(_onCodeAction);
 
     await _connection.listen();
     if (_socket != null) {
@@ -105,25 +106,18 @@ class EasyLocalizationLspServer {
       final config = _configs[rootPath];
       if (config == null) return;
       if (file.endsWith('.dart')) {
-        final errors = _analyzer.analyzeFile(context, file);
+        _analyzer.analyzeFile(context, file);
 
         _connection.sendDiagnostics(
           PublishDiagnosticsParams(
-            diagnostics: errors.map((e) => e.toLsp()).toList(),
-            uri: Uri.file(file),
-          ),
-        );
-
-        _connection.sendDiagnostics(
-          PublishDiagnosticsParams(
-            diagnostics: errors.map((e) => e.toLsp()).toList(),
+            diagnostics: _analyzer.getDiagnostics(file).map((e) => e.toLsp()).toList(),
             uri: Uri.file(file),
           ),
         );
 
         if (_clientCapabilities.experimental case {"supportsEasyLocalizationTranslationLabels": true}) {
           final List<TranslationLabel> labels = _analyzer.getTranslationLabels(file);
-          _log("Sending translation labels for $file: ${labels.length}");
+          _connection.log("Sending translation labels for $file: ${labels.length}");
           _connection.sendTranslationLabels(TranslationLabelNotification(file, labels));
         }
       } else if (config.isTranslationFile(file)) {
@@ -134,7 +128,7 @@ class EasyLocalizationLspServer {
         _analyzeFiles(dartFiles, context);
       }
     } on InconsistentAnalysisException catch (e) {
-      _log("""
+      _connection.log("""
 Inconsistent analysis exception: ${e.message}
 
 Assumed to be non-fatal, probably just running analysis on a file that has just changed. 
@@ -145,7 +139,7 @@ Assumed to be non-fatal, probably just running analysis on a file that has just 
   Future<void> _analyzeFiles(List<String> files, AnalysisContext context,
       {Either2<int, String>? token, bool reportPercentage = false}) async {
     // token ??= await _createProgressToken();
-    _sendProgressBegin(
+    _connection.sendProgressBegin(
         token,
         WorkDoneProgressBegin(
           title: 'Analyzing files',
@@ -162,7 +156,7 @@ Assumed to be non-fatal, probably just running analysis on a file that has just 
 
     for (final (i, file) in jsonFiles.indexed) {
       await _analyzeFile(file, context);
-      _sendProgressReport(
+      _connection.sendProgressReport(
           token,
           WorkDoneProgressReport(
             cancellable: false,
@@ -173,7 +167,7 @@ Assumed to be non-fatal, probably just running analysis on a file that has just 
 
     for (final (i, file) in priorityFiles.indexed) {
       await _analyzeFile(file, context);
-      _sendProgressReport(
+      _connection.sendProgressReport(
           token,
           WorkDoneProgressReport(
             cancellable: false,
@@ -184,7 +178,7 @@ Assumed to be non-fatal, probably just running analysis on a file that has just 
 
     for (final (i, file) in otherFiles.indexed) {
       await _analyzeFile(file, context);
-      _sendProgressReport(
+      _connection.sendProgressReport(
           token,
           WorkDoneProgressReport(
             cancellable: false,
@@ -193,7 +187,7 @@ Assumed to be non-fatal, probably just running analysis on a file that has just 
           ));
     }
 
-    _sendProgressDone(token, WorkDoneProgressEnd(message: 'Analysis complete'));
+    _connection.sendProgressDone(token, WorkDoneProgressEnd(message: 'Analysis complete'));
   }
 
   Future<Either2<int, String>?> _createProgressToken() async {
@@ -235,34 +229,27 @@ Assumed to be non-fatal, probably just running analysis on a file that has just 
 
   Future<void> _handleFilesChange(List<String> files) async {
     final affectedFiles = <String>{};
+
+    // Apply all changes to the contexts
     for (final file in files) {
       for (final context in _collection.contexts) {
         context.changeFile(file);
         affectedFiles.addAll(await context.applyPendingFileChanges());
       }
     }
+
+    // Determine which files need re-analysis
     for (final context in _collection.contexts) {
       final affectedFilesInContext = affectedFiles.where(context.contextRoot.isAnalyzed).toList(growable: false);
-      if (affectedFilesInContext.isEmpty) {
-        final translationFiles =
-            files.where((file) => _configs[context.contextRoot.root.path]?.isTranslationFile(file) == true);
-        if (translationFiles.isNotEmpty) {
-          await _analyzeFiles(translationFiles.toList(), context);
-        }
-      } else {
-        await _analyzeFiles(affectedFilesInContext, context);
-      }
-    }
-  }
 
-  void _log(String message) {
-    _connection.sendNotification(
-      'window/logMessage',
-      LogMessageParams(
-        message: message,
-        type: MessageType.Info,
-      ).toJson(),
-    );
+      final translationFiles =
+          files.where((file) => _configs[context.contextRoot.root.path]?.isTranslationFile(file) == true);
+      if (translationFiles.isNotEmpty) {
+        affectedFilesInContext.addAll(translationFiles);
+      }
+
+      await _analyzeFiles(affectedFilesInContext, context);
+    }
   }
 
   Future<List<CodeAction>> _onCodeAction(CodeActionParams params) {
@@ -325,7 +312,7 @@ Assumed to be non-fatal, probably just running analysis on a file that has just 
       resourceProvider: _resourceProvider,
       sdkPath: _sdkPath,
     );
-    _analyzer = EasyLocalizationAnalyzer(_collection, rootPaths, _log);
+    _analyzer = EasyLocalizationAnalyzer(_collection, rootPaths, _connection.log);
 
     Future.delayed(Duration.zero, () async {
       for (final context in _collection.contexts) {
@@ -346,7 +333,7 @@ Assumed to be non-fatal, probably just running analysis on a file that has just 
             triggerCharacters: ['.', '"'],
           ),
           renameProvider: Either2.t1(true),
-          codeActionProvider: Either2.t1(true),
+          // codeActionProvider: Either2.t1(true),
           experimental: {
             'easyLocalizationTranslationLabelsProvider': true,
           }),
@@ -363,31 +350,6 @@ Assumed to be non-fatal, probably just running analysis on a file that has just 
 
   Future<Either2<Range, PrepareRenameResult>?> _onRenamePrepare(TextDocumentPositionParams params) async {
     return _analyzer.prepareRename(params);
-  }
-
-  void _sendProgressBegin(Either2<int, String>? token, WorkDoneProgressBegin begin) {
-    if (token == null) return;
-    _connection.sendNotification('\$/progress', ProgressParams(token: token, value: begin).toJson());
-  }
-
-  void _sendProgressDone(Either2<int, String>? token, WorkDoneProgressEnd end) {
-    if (token == null) return;
-    _connection.sendNotification('\$/progress', ProgressParams(token: token, value: end).toJson());
-  }
-
-  void _sendProgressReport(Either2<int, String>? token, WorkDoneProgressReport report) {
-    if (token == null) return;
-    _connection.sendNotification('\$/progress', ProgressParams(token: token, value: report).toJson());
-  }
-
-  void _showMessage(String message) {
-    _connection.sendNotification(
-      'window/showMessage',
-      ShowMessageParams(
-        message: message,
-        type: MessageType.Info,
-      ).toJson(),
-    );
   }
 }
 

@@ -1,7 +1,6 @@
 import 'package:easy_localization_lsp/analysis/translation_call.dart';
+import 'package:easy_localization_lsp/analysis/translation_result.dart';
 import 'package:easy_localization_lsp/json/parser.dart';
-
-enum PluralCase { zero, one, two, few, many, other }
 
 class FlatKey {
   final String fullKey;
@@ -10,6 +9,8 @@ class FlatKey {
   FlatKey(this.fullKey, this.entry);
 }
 
+enum PluralCase { zero, one, two, few, many, other }
+
 class TranslationFile {
   final String path;
   late final Map<String, dynamic> entries;
@@ -17,6 +18,23 @@ class TranslationFile {
 
   TranslationFile(this.path, this.locations) {
     entries = locations.accept<dynamic>(JsonValueBuilder());
+  }
+
+  List<String> get keys {
+    final List<String> keys = [];
+    void getKeys(Map<String, dynamic> entries, String key) {
+      entries.forEach((k, v) {
+        final newKey = key.isEmpty ? k : "$key.$k";
+
+        keys.add(newKey);
+        if (v is Map<String, dynamic>) {
+          getKeys(v, newKey);
+        }
+      });
+    }
+
+    getKeys(entries, "");
+    return keys;
   }
 
   bool contains(TranslationCall call) {
@@ -34,9 +52,7 @@ class TranslationFile {
           }
           return true;
         } else if (entry is Map<String, dynamic>) {
-          if (call.isPlural &&
-              PluralCase.values
-                  .any((pluralCase) => entry.containsKey(pluralCase.name))) {
+          if (call.isPlural && PluralCase.values.any((pluralCase) => entry.containsKey(pluralCase.name))) {
             return true;
           }
           if (call.hasGender) {
@@ -56,20 +72,19 @@ class TranslationFile {
     return containsHelper(entries, keys.reversed.toList());
   }
 
-  List<String> get keys {
-    final List<String> keys = [];
-    void getKeys(Map<String, dynamic> entries, String key) {
-      entries.forEach((k, v) {
+  List<FlatKey> getFlatKeys() {
+    final List<FlatKey> keys = [];
+    void getKeys(JsonLocationMap map, String key) {
+      map.value.forEach((k, v) {
         final newKey = key.isEmpty ? k : "$key.$k";
-
-        keys.add(newKey);
-        if (v is Map<String, dynamic>) {
-          getKeys(v, newKey);
+        keys.add(FlatKey(newKey, v));
+        if (v case JsonLocationMapEntry(value: JsonLocationMap value)) {
+          getKeys(value, newKey);
         }
       });
     }
 
-    getKeys(entries, "");
+    getKeys(locations, "");
     return keys;
   }
 
@@ -95,19 +110,50 @@ class TranslationFile {
     return getHelper(locations, keys.reversed.toList());
   }
 
-  List<FlatKey> getFlatKeys() {
-    final List<FlatKey> keys = [];
-    void getKeys(JsonLocationMap map, String key) {
-      map.value.forEach((k, v) {
-        final newKey = key.isEmpty ? k : "$key.$k";
-        keys.add(FlatKey(newKey, v));
-        if (v case JsonLocationMapEntry(value: JsonLocationMap value)) {
-          getKeys(value, newKey);
+  TranslationResult translate(String key, {bool isPlural = false, bool isGendered = false}) {
+    final keys = key.split(".");
+    if (keys.isEmpty) {
+      return TranslationFailure(TranslationFailureReason.noSuchTranslationKeyTooShort);
+    }
+    TranslationResult translate(JsonLocationMap map, List<String> keys) {
+      final head = keys.removeAt(0);
+      final entry = map.value[head]?.value;
+      if (keys.isEmpty) {
+        switch (entry) {
+          case JsonLocationString():
+            if (isPlural) {
+              return TranslationFailure(TranslationFailureReason.callIsPluralButNoPluralTranslation);
+            } else if (isGendered) {
+              return TranslationFailure(TranslationFailureReason.callHasGenderButNoGenderTranslation);
+            }
+            return TranslationSuccess(entry);
+          case JsonLocationMap():
+            if (isPlural && PluralCase.values.any((pluralCase) => entry.value.containsKey(pluralCase.name))) {
+              return TranslationSuccess(entry);
+            } else if (isGendered) {
+              return TranslationSuccess(entry);
+            }
+          default:
+            // TODO could check in more detail, for example if the translation is a map that looks like a plural map
+            // with all keys being plural cases, the error could say something like translationIsPluralButCallIsNot
+            return TranslationFailure(TranslationFailureReason.noSuchTranslationKeyTooShort);
         }
-      });
+      }
+
+      if (entry is JsonLocationMap) {
+        return translate(entry, keys);
+      }
+
+      return TranslationFailure(TranslationFailureReason.noSuchTranslationKeyTooLong);
     }
 
-    getKeys(locations, "");
-    return keys;
+    return translate(locations, keys);
+  }
+
+  TranslationResult translateCall(TranslationCall call) {
+    if (call.translationKey == null) {
+      return TranslationFailure(TranslationFailureReason.noSuchTranslationKeyTooShort);
+    }
+    return translate(call.translationKey!, isPlural: call.isPlural, isGendered: call.hasGender);
   }
 }

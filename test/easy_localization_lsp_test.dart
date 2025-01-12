@@ -60,4 +60,12 @@ void main() {
 }'''));
     });
   });
+
+  group("String test", () {
+    test("String split with no match", () {
+      final text = "somestring";
+      final parts = text.split(".");
+      expect(parts, equals(["somestring"]));
+    });
+  });
 }

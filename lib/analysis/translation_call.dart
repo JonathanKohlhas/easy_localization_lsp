@@ -2,6 +2,7 @@
 
 import 'package:analyzer/src/dart/ast/ast.dart';
 import 'package:easy_localization_lsp/analysis/translation_file.dart';
+import 'package:easy_localization_lsp/analysis/translation_result.dart';
 import 'package:easy_localization_lsp/json/parser.dart';
 import 'package:easy_localization_lsp/util/location.dart';
 
@@ -31,23 +32,20 @@ class TranslationCall {
       };
 
   ResolvedTranslationCall resolve(List<TranslationFile> files) {
-    final translations = files
-        .map((file) {
-          if (!file.contains(this)) {
-            return null;
-          }
-          return file.getLocation(this);
-        })
-        .whereType<JsonLocationValue>()
-        .toList();
-    return ResolvedTranslationCall(invocation, location, translations);
+    final translationResults = files.map((file) {
+      return file.translateCall(this);
+    }).toList();
+    return ResolvedTranslationCall(invocation, location, translationResults);
   }
 }
 
 class ResolvedTranslationCall extends TranslationCall {
-  ResolvedTranslationCall(super.invocation, super.location, this.translations);
+  ResolvedTranslationCall(super.invocation, super.location, this.translationResults);
 
-  final List<JsonLocationValue> translations;
+  final List<TranslationResult> translationResults;
+
+  List<JsonLocationValue> get translations =>
+      translationResults.whereType<TranslationSuccess>().map((result) => result.value).toList();
 
   bool get isValid => translations.isNotEmpty;
 

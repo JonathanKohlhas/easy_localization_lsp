@@ -17,21 +17,17 @@ import 'package:easy_localization_lsp/util/location.dart';
 import 'package:lsp_server/lsp_server.dart' as lsp;
 
 class EasyLocalizationAnalyzer {
-  Map<String, TranslationFile> translationFiles = {};
-  Map<String, List<ResolvedTranslationCall>> translationCallsByFile = {};
-
   final void Function(String) log;
-  final AnalysisContextCollection _collection;
+
   final List<String> rootPaths;
 
+  Map<String, List<ResolvedTranslationCall>> translationCallsByFile = {};
+
+  Map<String, TranslationFile> translationFiles = {};
+  final AnalysisContextCollection _collection;
   EasyLocalizationAnalyzer(this._collection, this.rootPaths, this.log);
 
-  List<String> get filesWithUnresolvedTranslations => translationCallsByFile.entries
-      .where((entry) => entry.value.any((call) => !call.isValid))
-      .map((entry) => entry.key)
-      .toList();
-
-  List<AnalysisError> analyzeFile(AnalysisContext context, String path) {
+  void analyzeFile(AnalysisContext context, String path) {
     // log("Analyzing file: $path");
     final errors = <AnalysisError>[];
     if (context.currentSession.getParsedUnit(path) case ParsedUnitResult(unit: final unit)) {
@@ -58,29 +54,89 @@ class EasyLocalizationAnalyzer {
       final resolvedCalls = calls.map((call) => call.resolve(translationFiles.values.toList())).toList();
 
       translationCallsByFile[path] = resolvedCalls;
-
-      for (final call in resolvedCalls) {
-        final exists = call.isValid;
-        if (!exists) {
-          errors.add(AnalysisError(
-            AnalysisErrorSeverity.error,
-            call.location,
-            "Translation not found: ${call.translationKey}",
-          ));
-        }
-      }
     }
-    return errors;
+  }
+
+  List<AnalysisError> getDiagnostics(String path) {
+    return translationCallsByFile[path]
+            ?.where((call) => !call.isValid)
+            .map((call) => AnalysisError(
+                  AnalysisErrorSeverity.error,
+                  call.location,
+                  "Translation not found: ${call.translationKey}",
+                  code: AnalysisErrorCode.noSuchTranslation,
+                ))
+            .toList() ??
+        [];
   }
 
   void analyzeTranslationFile(AnalysisContext context, String path) {
-    // log("Analyzing translation file: $path");
     final content = context.currentSession.resourceProvider.getFile(path).readAsStringSync();
     final entries = JsonParser(content, sourceName: path).parse();
     if (entries is! JsonLocationMap) {
       throw ("Entries in translation file incorrect");
     }
     translationFiles[path] = TranslationFile(path, entries);
+  }
+
+  FlatKey? findTranslationKeyByRange(TranslationFile translationFile, lsp.RenameParams params) {
+    final key = translationFile
+        .getFlatKeys()
+        .where((k) => k.entry.key.location.toLsp().range.contains(params.position))
+        .firstOrNull;
+    return key;
+  }
+
+  TranslationFile getClosestTranslationFile(String path) {
+    final rootPath = rootPaths.reduce((value, element) {
+      final commonPrefixLengthValue = value.commonPrefixLength(path);
+      final commonPrefixLengthElement = element.commonPrefixLength(path);
+      return commonPrefixLengthValue > commonPrefixLengthElement ? value : element;
+    });
+    return translationFiles[rootPath]!;
+  }
+
+  Future<List<lsp.CodeAction>> getCodeActions(lsp.CodeActionParams params) async {
+    ///TODO:
+    /// Possible code actions:
+    /// - Add missing translation (Quick Fix)
+    /// - Rename key to similar existing key (Quick Fix)
+    /// - Convert string to translation key (Refactor)
+    final actions = <lsp.CodeAction?>[];
+
+    if (params.context.diagnostics.isNotEmpty) {
+      actions.addAll(_tryAddMissingTranslation(params));
+    }
+    return actions.whereType<lsp.CodeAction>().toList();
+  }
+
+  lsp.CompletionList getCompletion(DocumentPositionRequest r) {
+    final lines = r.unit.content.split("\n");
+    final line = lines[r.position.line];
+    //check if the position is insied some quotes (single or double) and find the string if it is in some
+    final quotes = RegExp(r'''['"]''');
+    final quoteBefore = line.substring(0, r.position.character).lastIndexOf(quotes);
+    final quoteAfter = line.indexOf(quotes, r.position.character);
+    //log("Quote before: $quoteBefore, Quote after: $quoteAfter");
+    //We are ignoring the possibility of having a string that contains both single and double quotes
+    //as any translation keys would probably not contain those
+    //TODO: Robust string selection
+
+    if (quoteBefore != -1 && quoteAfter != -1) {
+      final start = quoteBefore + 1;
+      final end = quoteAfter;
+      final key = line.substring(start, end);
+      final completions = translationFiles.values
+          .expand((file) => file.keys)
+          .where((translationKey) => translationKey.startsWith(key))
+          .map((key) => lsp.CompletionItem(
+                label: key,
+                kind: lsp.CompletionItemKind.Text,
+              ))
+          .toList();
+      return lsp.CompletionList(isIncomplete: false, items: completions);
+    }
+    return lsp.CompletionList(isIncomplete: false, items: []);
   }
 
   List<lsp.Location> getDeclaration(String path, int offset) {
@@ -101,6 +157,11 @@ class EasyLocalizationAnalyzer {
 
     return locations.map((l) => l.toLsp()).toList();
   }
+
+  List<String> getFilesWithUnresolvedTranslations() => translationCallsByFile.entries
+      .where((entry) => entry.value.any((call) => !call.isValid))
+      .map((entry) => entry.key)
+      .toList();
 
   lsp.Hover? getHoverInfo(lsp.TextDocumentPositionParams params) {
     var calls = translationCallsByFile[params.textDocument.uri.path];
@@ -138,35 +199,6 @@ class EasyLocalizationAnalyzer {
     return lsp.Hover(contents: lsp.Either2.t1(content), range: overlappingCall.location.toLsp().range);
   }
 
-  lsp.CompletionList getCompletion(DocumentPositionRequest r) {
-    final lines = r.unit.content.split("\n");
-    final line = lines[r.position.line];
-    //check if the position is insied some quotes (single or double) and find the string if it is in some
-    final quotes = RegExp(r'''['"]''');
-    final quoteBefore = line.substring(0, r.position.character).lastIndexOf(quotes);
-    final quoteAfter = line.indexOf(quotes, r.position.character);
-    //log("Quote before: $quoteBefore, Quote after: $quoteAfter");
-    //We are ignoring the possibility of having a string that contains both single and double quotes
-    //as any translation keys would probably not contain those
-    //TODO: Robust string selection
-
-    if (quoteBefore != -1 && quoteAfter != -1) {
-      final start = quoteBefore + 1;
-      final end = quoteAfter;
-      final key = line.substring(start, end);
-      final completions = translationFiles.values
-          .expand((file) => file.keys)
-          .where((translationKey) => translationKey.startsWith(key))
-          .map((key) => lsp.CompletionItem(
-                label: key,
-                kind: lsp.CompletionItemKind.Text,
-              ))
-          .toList();
-      return lsp.CompletionList(isIncomplete: false, items: completions);
-    }
-    return lsp.CompletionList(isIncomplete: false, items: []);
-  }
-
   Future<List<lsp.Location>> getReferences(lsp.ReferenceParams params) async {
     if (params.textDocument.uri.path.endsWith(".json")) {
       final translationFile = translationFiles[params.textDocument.uri.path];
@@ -189,6 +221,51 @@ class EasyLocalizationAnalyzer {
     return [];
   }
 
+  SimpleStringLiteral? getSelectedStringLiteral(CompilationUnit unit, int offset, int length) {
+    final visitor = SelectedStringVisitor(offset, length);
+    unit.accept(visitor);
+    final selectedString = visitor.selectedString;
+    return selectedString;
+  }
+
+  (lsp.Range, SimpleStringLiteral)? getSelectedStringLiteralByRange(String path, lsp.Range selection) {
+    final unit = _collection.contextFor(path).currentSession.getParsedUnit(path);
+    if (unit is! ParsedUnitResult) {
+      return null;
+    }
+    final lineInfo = unit.lineInfo;
+    final (:offset, :length) = rangeToSelection(lineInfo, selection);
+
+    final selectedString = getSelectedStringLiteral(unit.unit, offset, length);
+    if (selectedString == null) {
+      return null;
+    }
+
+    final range = selectionToRange(lineInfo, selectedString.offset, selectedString.length);
+    return (range, selectedString);
+  }
+
+  List<TranslationLabel> getTranslationLabels(String file) {
+    final translationCalls = translationCallsByFile[file];
+    if (translationCalls == null) {
+      return [];
+    }
+    final labels = translationCalls
+        .where((call) => call.isValid)
+        .map((call) {
+          final closestTranslation = call.closestTranslation(file);
+          if (closestTranslation == null) {
+            return null;
+          }
+          final label = jsonEncode(closestTranslation.accept(JsonValueBuilder()));
+          return TranslationLabel(label, call.location.toLsp().range);
+        })
+        .whereType<TranslationLabel>()
+        .toList();
+
+    return labels;
+  }
+
   Future<lsp.Either2<lsp.Range, lsp.PrepareRenameResult>?> prepareRename(lsp.TextDocumentPositionParams params) async {
     if (params.textDocument.uri.path.endsWith(".json")) {
       final translationFile = translationFiles[params.textDocument.uri.path];
@@ -206,6 +283,13 @@ class EasyLocalizationAnalyzer {
     }
 
     return null;
+  }
+
+  ({int offset, int length}) rangeToSelection(LineInfo lineInfo, lsp.Range range) {
+    final offset = lineInfo.getOffsetOfLine(range.start.line) + range.start.character;
+    final offsetEnd = lineInfo.getOffsetOfLine(range.end.line) + range.end.character;
+    final length = offsetEnd - offset;
+    return (offset: offset, length: length);
   }
 
   Future<RenameResponse?> rename(lsp.RenameParams params) async {
@@ -259,47 +343,22 @@ class EasyLocalizationAnalyzer {
     return null;
   }
 
-  FlatKey? findTranslationKeyByRange(TranslationFile translationFile, lsp.RenameParams params) {
-    final key = translationFile
-        .getFlatKeys()
-        .where((k) => k.entry.key.location.toLsp().range.contains(params.position))
-        .firstOrNull;
-    return key;
+  lsp.Range selectionToRange(LineInfo lineInfo, int offset, int length) {
+    final start = lineInfo.getLocation(offset);
+    final end = lineInfo.getLocation(offset + length);
+    return lsp.Range(
+      start: lsp.Position(line: start.lineNumber, character: start.columnNumber),
+      end: lsp.Position(line: end.lineNumber, character: end.columnNumber),
+    );
   }
 
-  List<TranslationLabel> getTranslationLabels(String file) {
-    final translationCalls = translationCallsByFile[file];
-    if (translationCalls == null) {
-      return [];
+  Future<ResolvedUnitResult> _getResolvedUnit(String path) async {
+    final context = _collection.contextFor(path);
+    final result = await context.currentSession.getResolvedUnit(path);
+    if (result is ResolvedUnitResult) {
+      return result;
     }
-    final labels = translationCalls
-        .where((call) => call.isValid)
-        .map((call) {
-          final closestTranslation = call.closestTranslation(file);
-          if (closestTranslation == null) {
-            return null;
-          }
-          final label = jsonEncode(closestTranslation.accept(JsonValueBuilder()));
-          return TranslationLabel(label, call.location.toLsp().range);
-        })
-        .whereType<TranslationLabel>()
-        .toList();
-
-    return labels;
-  }
-
-  Future<List<lsp.CodeAction>> getCodeActions(lsp.CodeActionParams params) async {
-    ///TODO:
-    /// Possible code actions:
-    /// - Add missing translation (Quick Fix)
-    /// - Rename key to similar existing key (Quick Fix)
-    /// - Convert string to translation key (Refactor)
-    final actions = <lsp.CodeAction?>[];
-
-    if (params.context.diagnostics.isNotEmpty) {
-      actions.addAll(_tryAddMissingTranslation(params));
-    }
-    return actions.whereType<lsp.CodeAction>().toList();
+    throw Exception("Could not get resolved unit for $path");
   }
 
   List<lsp.CodeAction> _tryAddMissingTranslation(lsp.CodeActionParams params) {
@@ -350,87 +409,24 @@ class EasyLocalizationAnalyzer {
     //   edit: edit,
     // );
   }
-
-  (lsp.Range, SimpleStringLiteral)? getSelectedStringLiteralByRange(String path, lsp.Range selection) {
-    final unit = _collection.contextFor(path).currentSession.getParsedUnit(path);
-    if (unit is! ParsedUnitResult) {
-      return null;
-    }
-    final lineInfo = unit.lineInfo;
-    final (:offset, :length) = rangeToSelection(lineInfo, selection);
-
-    final selectedString = getSelectedStringLiteral(unit.unit, offset, length);
-    if (selectedString == null) {
-      return null;
-    }
-
-    final range = selectionToRange(lineInfo, selectedString.offset, selectedString.length);
-    return (range, selectedString);
-  }
-
-  SimpleStringLiteral? getSelectedStringLiteral(CompilationUnit unit, int offset, int length) {
-    final visitor = SelectedStringVisitor(offset, length);
-    unit.accept(visitor);
-    final selectedString = visitor.selectedString;
-    return selectedString;
-  }
-
-  ({int offset, int length}) rangeToSelection(LineInfo lineInfo, lsp.Range range) {
-    final offset = lineInfo.getOffsetOfLine(range.start.line) + range.start.character;
-    final offsetEnd = lineInfo.getOffsetOfLine(range.end.line) + range.end.character;
-    final length = offsetEnd - offset;
-    return (offset: offset, length: length);
-  }
-
-  lsp.Range selectionToRange(LineInfo lineInfo, int offset, int length) {
-    final start = lineInfo.getLocation(offset);
-    final end = lineInfo.getLocation(offset + length);
-    return lsp.Range(
-      start: lsp.Position(line: start.lineNumber, character: start.columnNumber),
-      end: lsp.Position(line: end.lineNumber, character: end.columnNumber),
-    );
-  }
-
-  TranslationFile getClosestTranslationFile(String path) {
-    final rootPath = rootPaths.reduce((value, element) {
-      final commonPrefixLengthValue = value.commonPrefixLength(path);
-      final commonPrefixLengthElement = element.commonPrefixLength(path);
-      return commonPrefixLengthValue > commonPrefixLengthElement ? value : element;
-    });
-    return translationFiles[rootPath]!;
-  }
-
-  void addKeyToTranslationFile(Map<String, dynamic> jsonTranslation, String key, String value) {
-    final parts = key.split(".");
-    void addKeyHelper(Map<String, dynamic> json, List<String> parts, String value) {
-      if (parts.length == 1) {
-        json[parts.first] = value;
-      } else {
-        final part = parts.first;
-        if (!json.containsKey(part)) {
-          json[part] = {};
-        }
-        addKeyHelper(json[part], parts.sublist(1), value);
-      }
-    }
-
-    addKeyHelper(jsonTranslation, parts, value);
-  }
 }
 
 class RenameResponse {
-  final lsp.WorkspaceEdit edit;
   final List<String> affectedFiles;
-
+  final lsp.WorkspaceEdit edit;
   RenameResponse(this.edit, this.affectedFiles);
 }
 
 class SelectedStringVisitor extends GeneralizingAstVisitor<void> {
-  SimpleStringLiteral? selectedString;
-  final int offset;
   final int length;
 
+  final int offset;
+  SimpleStringLiteral? selectedString;
   SelectedStringVisitor(this.offset, this.length);
+
+  bool rangeOverlaps(int start, int end) {
+    return (start <= offset && end >= offset) || (start <= offset + length && end >= offset + length);
+  }
 
   @override
   void visitStringLiteral(StringLiteral node) {
@@ -440,9 +436,5 @@ class SelectedStringVisitor extends GeneralizingAstVisitor<void> {
       selectedString = node;
     }
     super.visitStringLiteral(node);
-  }
-
-  bool rangeOverlaps(int start, int end) {
-    return (start <= offset && end >= offset) || (start <= offset + length && end >= offset + length);
   }
 }

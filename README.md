@@ -20,7 +20,7 @@ LSP support for flutter easy localization
 ## Editor Support
 - VSCode Extension: in folder `easy-localization-lsp-vscode`
 - Nvim: Build lsp executable and use lspconfig to set it up (ready to use plugin may be developed in the future)
-- IntelliJ Plugin: to be developed
+- IntelliJ Plugin: to be developed (default lsp features can be used with LSP4IJ plugin)
 
 ## Known Issues
 

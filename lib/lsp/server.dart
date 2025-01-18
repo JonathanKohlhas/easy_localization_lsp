@@ -8,6 +8,7 @@ import 'package:analyzer/dart/analysis/results.dart';
 import 'package:analyzer/dart/analysis/session.dart';
 import 'package:analyzer/file_system/overlay_file_system.dart';
 import 'package:analyzer/file_system/physical_file_system.dart';
+import 'package:analyzer/source/line_info.dart';
 import 'package:easy_localization_lsp/analysis/analyzer.dart';
 import 'package:easy_localization_lsp/config/config.dart';
 import 'package:easy_localization_lsp/lsp/connection.dart';
@@ -22,7 +23,7 @@ class DocumentPositionRequest {
 
   final String path;
   final Position position;
-  final ResolvedUnitResult unit;
+  final ParsedUnitResult unit;
 }
 
 class EasyLocalizationLspServer {
@@ -39,6 +40,7 @@ class EasyLocalizationLspServer {
   final ListQueue<String> _priorityFiles = ListQueue();
   final _fileChangeController = StreamController<List<String>>();
   late final OverlayResourceProvider _resourceProvider;
+  late final List<String> rootPaths;
   Socket? _socket;
 
   Future<void> start() async {
@@ -78,7 +80,8 @@ class EasyLocalizationLspServer {
     for (final path in paths) {
       final dartPath = [path, 'dart'].join(Platform.pathSeparator);
       if (File(dartPath).existsSync()) {
-        return [File(dartPath).parent.absolute.path, 'cache', 'dart-sdk'].join(Platform.pathSeparator);
+        return [File(dartPath).parent.absolute.path, 'cache', 'dart-sdk']
+            .join(Platform.pathSeparator);
       }
     }
 
@@ -93,37 +96,39 @@ class EasyLocalizationLspServer {
   }
 
   Future<void> _analyzeFile(String file, AnalysisContext context) async {
-    await suspendToScheduler();
-    // _connection.log("Analyzing file: $file");
-    try {
-      final rootPath = context.contextRoot.root.path;
-      final config = _configs[rootPath];
-      if (config == null) return;
-      if (file.endsWith('.dart')) {
-        _analyzer.analyzeFile(context, file);
+    return await Future.microtask(() {
+      // _connection.log("Analyzing file: $file");
+      try {
+        final rootPath = context.contextRoot.root.path;
+        final config = _configs[rootPath];
+        if (config == null) return;
+        if (file.endsWith('.dart')) {
+          _analyzer.analyzeFile(context, file);
 
-        _connection.sendDiagnostics(
-          PublishDiagnosticsParams(
-            diagnostics: _analyzer.getDiagnostics(file).map((e) => e.toLsp()).toList(),
-            uri: Uri.file(file),
-          ),
-        );
+          _connection.sendDiagnostics(
+            PublishDiagnosticsParams(
+              diagnostics: _analyzer.getDiagnostics(file).map((e) => e.toLsp()).toList(),
+              uri: Uri.file(file),
+            ),
+          );
 
-        if (_clientCapabilities.experimental case {"supportsEasyLocalizationTranslationLabels": true}) {
-          final List<TranslationLabel> labels = _analyzer.getTranslationLabels(file);
-          _connection.sendTranslationLabels(TranslationLabelNotification(file, labels));
+          if (_clientCapabilities.experimental
+              case {"supportsEasyLocalizationTranslationLabels": true}) {
+            final List<TranslationLabel> labels = _analyzer.getTranslationLabels(file);
+            _connection.sendTranslationLabels(TranslationLabelNotification(file, labels));
+          }
+        } else if (config.isTranslationFile(file)) {
+          _analyzer.analyzeTranslationFile(context, file);
+          _fileChangeController.add(_analyzer.filesWithTranslations);
         }
-      } else if (config.isTranslationFile(file)) {
-        _analyzer.analyzeTranslationFile(context, file);
-        _fileChangeController.add(_analyzer.filesWithTranslations);
-      }
-    } on InconsistentAnalysisException catch (e) {
-      _connection.log("""
+      } on InconsistentAnalysisException catch (e) {
+        _connection.log("""
 Inconsistent analysis exception: ${e.message}
 
 Assumed to be non-fatal, probably just running analysis on a file that has just changed. 
 """);
-    }
+      }
+    });
   }
 
   Future<void> _startFileAnalysis() async {
@@ -165,7 +170,7 @@ Assumed to be non-fatal, probably just running analysis on a file that has just 
 
   Future<Either3<Location, List<Location>, List<LocationLink>>?> _getDeclaration(
       TextDocumentPositionParams param) async {
-    final unit = await _getResolvedUnit(param.textDocument.uri.path);
+    final unit = _getParsedUnit(param.textDocument.uri.path);
     final offset = unit.lineInfo.getOffsetOfLine(param.position.line) + param.position.character;
     final List<Location> locations = _analyzer.getDeclaration(param.textDocument.uri.path, offset);
 
@@ -176,13 +181,13 @@ Assumed to be non-fatal, probably just running analysis on a file that has just 
     return _analyzer.getReferences(params);
   }
 
-  Future<ResolvedUnitResult> _getResolvedUnit(String path) async {
+  ParsedUnitResult _getParsedUnit(String path) {
     final context = _collection.contextFor(path);
-    final result = await context.currentSession.getResolvedUnit(path);
-    if (result is ResolvedUnitResult) {
+    final result = context.currentSession.getParsedUnit(path);
+    if (result is ParsedUnitResult) {
       return result;
     }
-    throw Exception("Could not get resolved unit for $path");
+    throw Exception("Could not get parsed unit for $path");
   }
 
   Future<void> _handleFileChange(String file) async {
@@ -204,8 +209,8 @@ Assumed to be non-fatal, probably just running analysis on a file that has just 
     for (final context in _collection.contexts) {
       final affectedFilesInContext = affectedFiles.where(context.contextRoot.isAnalyzed).toList();
 
-      final translationFiles =
-          files.where((file) => _configs[context.contextRoot.root.path]?.isTranslationFile(file) == true);
+      final translationFiles = files.where(
+          (file) => _configs[context.contextRoot.root.path]?.isTranslationFile(file) == true);
       if (translationFiles.isNotEmpty) {
         affectedFilesInContext.addAll(translationFiles);
       }
@@ -222,22 +227,29 @@ Assumed to be non-fatal, probably just running analysis on a file that has just 
     return _analyzer.getCompletion(DocumentPositionRequest(
       params.textDocument.uri.path,
       params.position,
-      await _getResolvedUnit(params.textDocument.uri.path),
+      _getParsedUnit(params.textDocument.uri.path),
     ));
   }
 
   Future<dynamic> _onDidChangeTextDocument(DidChangeTextDocumentParams params) async {
     // _connection.log("onDidChangeTextDocument: ${params.textDocument.uri.path}");
-    var contentChanges = params.contentChanges.map((content) {
-      return content.map(
-        (document) => TextDocumentContentChangeEvent2(text: document.text),
-        (document) => document,
-      );
-    });
+    // var contentChanges = params.contentChanges.map((content) {
+    //   return content.map(
+    //     (document) => TextDocumentContentChangeEvent(
+    //         text: document.text, range: document.range, rangeLength: document.rangeLength),
+    //     (document) => TextDocumentContentChangeEvent(text: document.text),
+    //   );
+    // });
+    // _connection.log("onDidChangeTextDocument: ${params.toJson()}");
+
+    final String text = _resourceProvider.getFile(params.textDocument.uri.path).readAsStringSync();
+    // _connection.log("original text: $text");
+    final String newText = params.contentChanges.fold(text, (text, change) => change.apply(text));
+    // _connection.log("new text: $newText");
 
     _resourceProvider.setOverlay(
       params.textDocument.uri.path,
-      content: contentChanges.first.text,
+      content: newText,
       modificationStamp: _overlayModificationStamp++,
     );
 
@@ -268,7 +280,7 @@ Assumed to be non-fatal, probably just running analysis on a file that has just 
   Future<InitializeResult> _onInitialize(InitializeParams params) async {
     _clientCapabilities = params.capabilities;
     _resourceProvider = OverlayResourceProvider(PhysicalResourceProvider.INSTANCE);
-    final rootPaths = params.workspaceFolders?.map((folder) => folder.uri.path).toList() ??
+    rootPaths = params.workspaceFolders?.map((folder) => folder.uri.path).toList() ??
         [params.rootUri?.path ?? params.rootPath ?? Directory.current.absolute.path];
     _collection = AnalysisContextCollection(
       includedPaths: rootPaths,
@@ -287,7 +299,7 @@ Assumed to be non-fatal, probably just running analysis on a file that has just 
 
     return InitializeResult(
       capabilities: ServerCapabilities(
-          textDocumentSync: const Either2.t1(TextDocumentSyncKind.Full),
+          textDocumentSync: const Either2.t1(TextDocumentSyncKind.Incremental),
           declarationProvider: Either3.t1(true),
           definitionProvider: Either2.t1(true),
           referencesProvider: Either2.t1(true),
@@ -312,7 +324,8 @@ Assumed to be non-fatal, probably just running analysis on a file that has just 
     return resp?.edit;
   }
 
-  Future<Either2<Range, PrepareRenameResult>?> _onRenamePrepare(TextDocumentPositionParams params) async {
+  Future<Either2<Range, PrepareRenameResult>?> _onRenamePrepare(
+      TextDocumentPositionParams params) async {
     return _analyzer.prepareRename(params);
   }
 }
@@ -323,4 +336,35 @@ class EasyLocalizationLspServerOptions {
   }) : connection = connection ?? ConnectionType.stdio();
 
   final ConnectionType connection;
+}
+
+// class TextDocumentContentChangeEvent {
+//   /// The range of the document that changed.
+//   final Range? range;
+
+//   /// The optional length of the range that got replaced.
+//   ///
+//   /// @deprecated use range instead.
+//   final int? rangeLength;
+
+//   /// The new text for the provided range.
+//   final String text;
+
+//   TextDocumentContentChangeEvent({required this.text, this.range, this.rangeLength});
+
+//   String apply(String content) {
+//     if (range == null) return text;
+//     final lineInfo = LineInfo.fromContent(content);
+//     final (:offset, :length) = rangeToSelection(lineInfo, range!);
+//     return content.replaceRange(offset, length, text);
+//   }
+// }
+extension TextDocumentContentChangeEventApply on TextDocumentContentChangeEvent {
+  String apply(String content) {
+    return map((replaceRange) {
+      final lineInfo = LineInfo.fromContent(content);
+      final (:offset, :length) = rangeToSelection(lineInfo, replaceRange.range);
+      return content.replaceRange(offset, offset + length, replaceRange.text);
+    }, (replaceContent) => replaceContent.text);
+  }
 }

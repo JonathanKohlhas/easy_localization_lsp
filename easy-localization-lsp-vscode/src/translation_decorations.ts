@@ -74,7 +74,7 @@ export class EasyLocalizationTranslationDecorator implements vs.Disposable {
   }
 
   update(editor: vs.TextEditor) {
-    console.log("updateDecorations for", editor.document.uri.path);
+    // console.log("updateDecorations for", editor.document.uri.path);
     let decorations: vs.DecorationOptions[] = [];
     // decorations.push({
     //   hoverMessage: `translation from ${this.translationServer.formatFilePath(
@@ -133,7 +133,7 @@ export class EasyLocalizationTranslationDecorator implements vs.Disposable {
         if (provider) {
           disposables.push(client.onNotification(TranslationLabelNotification.type, (params) => {
             const uri = client.protocol2CodeConverter.asUri(params.uri);
-            console.log("got labels for ", uri.path);
+            // console.log("got labels for ", uri.path);
             labels.set(uri.path, params.labels);
             for (let editor of vs.window.visibleTextEditors) {
               if (editor.document.uri.path === uri.path) {

@@ -15,6 +15,7 @@ import 'package:easy_localization_lsp/easy_localization_lsp.dart';
 import 'package:easy_localization_lsp/json/parser.dart';
 import 'package:easy_localization_lsp/protocol/labels_provider.dart';
 import 'package:easy_localization_lsp/util/location.dart';
+import 'package:easy_localization_lsp/util/utils.dart';
 import 'package:lsp_server/lsp_server.dart' as lsp;
 
 class EasyLocalizationAnalyzer {
@@ -30,7 +31,19 @@ class EasyLocalizationAnalyzer {
   final AnalysisContextCollection _collection;
   EasyLocalizationAnalyzer(this._collection, this.rootPaths, this.log);
 
+  AnalysisContext? tryGetContextFor(String path) {
+    try {
+      return _collection.contextFor(path);
+    } catch (e) {
+      return null;
+    }
+  }
+
+  int count = 0;
+  Duration total = Duration.zero;
+
   void analyzeFile(AnalysisContext context, String path) {
+    final sw = Stopwatch()..start();
     if (context.currentSession.getParsedUnit(path) case ParsedUnitResult(unit: final unit)) {
       final visitor = TranslationVisitor();
       unit.accept(visitor);
@@ -52,9 +65,15 @@ class EasyLocalizationAnalyzer {
               endColumn: end.columnNumber,
             ));
       });
-      final resolvedCalls = calls.map((call) => call.resolve(translationFiles.values.toList())).toList();
+      final resolvedCalls =
+          calls.map((call) => call.resolve(translationFiles.values.toList())).toList();
 
       translationCallsByFile[path] = resolvedCalls;
+    }
+    total += sw.elapsed;
+    count++;
+    if (count % 100 == 0) {
+      log("Average time: ${total.inMilliseconds / count}ms");
     }
   }
 
@@ -126,8 +145,12 @@ class EasyLocalizationAnalyzer {
   }
 
   lsp.CompletionList getCompletion(DocumentPositionRequest r) {
+    final context = tryGetContextFor(r.path);
+    if (context == null) {
+      return lsp.CompletionList(isIncomplete: false, items: []);
+    }
     final lines =
-        _collection.contextFor(r.path).currentSession.resourceProvider.getFile(r.path).readAsStringSync().split("\n");
+        context.currentSession.resourceProvider.getFile(r.path).readAsStringSync().split("\n");
     final line = lines[r.position.line];
     //check if the position is insied some quotes (single or double) and find the string if it is in some
     final quotes = RegExp(r'''['"]''');
@@ -145,7 +168,6 @@ class EasyLocalizationAnalyzer {
       final start = quoteBefore + 1;
       final end = r.position.character - 1;
       final key = line.substring(start, end);
-      log("Suggestions for Key: $key");
       final completions = translationFiles.values
           .expand((file) => file.keys)
           .where((translationKey) => translationKey.startsWith(key))
@@ -171,7 +193,8 @@ class EasyLocalizationAnalyzer {
       return [];
     }
 
-    final overlappingCalls = calls.where((call) => offset >= call.invocation.offset && offset <= call.invocation.end);
+    final overlappingCalls =
+        calls.where((call) => offset >= call.invocation.offset && offset <= call.invocation.end);
 
     final locations = <Location>[];
 
@@ -194,7 +217,8 @@ class EasyLocalizationAnalyzer {
     if (calls == null) {
       return null;
     }
-    final overlappingCall = calls.where((call) => call.location.toLsp().range.contains(params.position)).firstOrNull;
+    final overlappingCall =
+        calls.where((call) => call.location.toLsp().range.contains(params.position)).firstOrNull;
     if (overlappingCall == null) {
       return null;
     }
@@ -222,7 +246,8 @@ class EasyLocalizationAnalyzer {
       kind: lsp.MarkupKind.Markdown,
       value: text.join("\n\n"),
     );
-    return lsp.Hover(contents: lsp.Either2.t1(content), range: overlappingCall.location.toLsp().range);
+    return lsp.Hover(
+        contents: lsp.Either2.t1(content), range: overlappingCall.location.toLsp().range);
   }
 
   Future<List<lsp.Location>> getReferences(lsp.ReferenceParams params) async {
@@ -254,8 +279,9 @@ class EasyLocalizationAnalyzer {
     return selectedString;
   }
 
-  (lsp.Range, SimpleStringLiteral)? getSelectedStringLiteralByRange(String path, lsp.Range selection) {
-    final unit = _collection.contextFor(path).currentSession.getParsedUnit(path);
+  (lsp.Range, SimpleStringLiteral)? getSelectedStringLiteralByRange(
+      String path, lsp.Range selection) {
+    final unit = tryGetContextFor(path)?.currentSession.getParsedUnit(path);
     if (unit is! ParsedUnitResult) {
       return null;
     }
@@ -292,7 +318,8 @@ class EasyLocalizationAnalyzer {
     return labels;
   }
 
-  Future<lsp.Either2<lsp.Range, lsp.PrepareRenameResult>?> prepareRename(lsp.TextDocumentPositionParams params) async {
+  Future<lsp.Either2<lsp.Range, lsp.PrepareRenameResult>?> prepareRename(
+      lsp.TextDocumentPositionParams params) async {
     if (params.textDocument.uri.path.endsWith(".json")) {
       final translationFile = translationFiles[params.textDocument.uri.path];
       if (translationFile == null) return null;
@@ -309,13 +336,6 @@ class EasyLocalizationAnalyzer {
     }
 
     return null;
-  }
-
-  ({int offset, int length}) rangeToSelection(LineInfo lineInfo, lsp.Range range) {
-    final offset = lineInfo.getOffsetOfLine(range.start.line) + range.start.character;
-    final offsetEnd = lineInfo.getOffsetOfLine(range.end.line) + range.end.character;
-    final length = offsetEnd - offset;
-    return (offset: offset, length: length);
   }
 
   Future<RenameResponse?> rename(lsp.RenameParams params) async {
@@ -350,10 +370,16 @@ class EasyLocalizationAnalyzer {
         final callRange = call.location.toLsp().range;
         final stringLength = call.invocation.target!.length;
         final textRange = lsp.Range(
-            start: lsp.Position(line: callRange.start.line, character: callRange.start.character + 1),
-            end: lsp.Position(line: callRange.start.line, character: callRange.start.character + stringLength - 1));
+            start:
+                lsp.Position(line: callRange.start.line, character: callRange.start.character + 1),
+            end: lsp.Position(
+                line: callRange.start.line,
+                character: callRange.start.character + stringLength - 1));
         affectedFiles.add(call.location.file);
-        return (key: Uri.parse(call.location.file), value: lsp.TextEdit(range: textRange, newText: newFullKey));
+        return (
+          key: Uri.parse(call.location.file),
+          value: lsp.TextEdit(range: textRange, newText: newFullKey)
+        );
       }).fold(keyRename, (acc, edit) {
         if (acc.containsKey(edit.key)) {
           acc[edit.key]!.add(edit.value);
@@ -378,14 +404,14 @@ class EasyLocalizationAnalyzer {
     );
   }
 
-  Future<ResolvedUnitResult> _getResolvedUnit(String path) async {
-    final context = _collection.contextFor(path);
-    final result = await context.currentSession.getResolvedUnit(path);
-    if (result is ResolvedUnitResult) {
-      return result;
-    }
-    throw Exception("Could not get resolved unit for $path");
-  }
+  // Future<ResolvedUnitResult> _getResolvedUnit(String path) async {
+  //   final context = tryGetContextFor(path);
+  //   final result = await context?.currentSession.getResolvedUnit(path);
+  //   if (result is ResolvedUnitResult) {
+  //     return result;
+  //   }
+  //   throw Exception("Could not get resolved unit for $path");
+  // }
 
   List<lsp.CodeAction> _tryAddMissingTranslation(lsp.CodeActionParams params) {
     return params.context.diagnostics
@@ -394,7 +420,8 @@ class EasyLocalizationAnalyzer {
         )
         .map((diagnostic) {
           final (range, selectedString) =
-              getSelectedStringLiteralByRange(params.textDocument.uri.path, diagnostic.range) ?? (null, null);
+              getSelectedStringLiteralByRange(params.textDocument.uri.path, diagnostic.range) ??
+                  (null, null);
           if (range == null ||
               selectedString == null ||
               selectedString.stringValue == null ||
@@ -453,7 +480,8 @@ class SelectedStringVisitor extends GeneralizingAstVisitor<void> {
   SelectedStringVisitor(this.offset, this.length);
 
   bool rangeOverlaps(int start, int end) {
-    return (start <= offset && end >= offset) || (start <= offset + length && end >= offset + length);
+    return (start <= offset && end >= offset) ||
+        (start <= offset + length && end >= offset + length);
   }
 
   @override

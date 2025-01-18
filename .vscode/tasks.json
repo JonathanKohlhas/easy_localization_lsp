@@ -4,6 +4,7 @@
 	"version": "2.0.0",
 	"tasks": [
 		{
+			"label": "tsc-watch",
 			"type": "npm",
 			"script": "watch",
 			"problemMatcher": "$tsc-watch",
@@ -17,7 +18,27 @@
 			},
 			"options": {
 				"cwd": "${workspaceFolder}/easy-localization-lsp-vscode"
-			}
-		}
+			},
+			"dependsOn": [
+				"dart compile kernel"
+			]
+		},
+		{
+			"label": "dart compile kernel",
+			"type": "dart",
+			// "command": "dart compile kernel ./bin/easy_localization_lsp.dart -o ./easy-localization-lsp-vscode/easy_localization_lsp.dill",
+			"command": "dart",
+			"args": [
+				"compile",
+				"kernel",
+				"./bin/easy_localization_lsp.dart",
+				"-o",
+				"./easy-localization-lsp-vscode/easy_localization_lsp.dill"
+			],
+			"group": {
+				"kind": "build",
+				// "isDefault": true,
+			},
+		},
 	]
 }

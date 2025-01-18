@@ -4,7 +4,7 @@
  * ------------------------------------------------------------------------------------------ */
 
 import * as path from 'path';
-import { workspace, ExtensionContext } from 'vscode';
+import { workspace, ExtensionContext, CancellationToken } from 'vscode';
 
 import {
 	CloseAction,
@@ -17,7 +17,9 @@ import {
 	Message,
 	RevealOutputChannelOn,
 	ServerOptions,
-	TransportKind
+	TransportKind,
+	Middleware,
+	MessageSignature,
 } from 'vscode-languageclient/node';
 import { EasyLocalizationTranslationDecorator } from './translation_decorations';
 
@@ -76,6 +78,7 @@ export function activate(context: ExtensionContext) {
 				workspace.createFileSystemWatcher('**/*.dart'),
 			]
 		},
+		middleware: new LogMiddleware(),
 		// errorHandler: new MyErrorHandler(),
 
 	};
@@ -104,3 +107,55 @@ export function deactivate(): Thenable<void> | undefined {
 	return client.stop();
 }
 
+class LogMiddleware implements Middleware {
+
+	sendNotification<R>(this: void, type: string | MessageSignature, next: (type: string | MessageSignature, params?: R) => Promise<void>, params: R): Promise<void> {
+		let typeString;
+		if (typeof type === 'string') {
+			typeString = type;
+		} else {
+			typeString = type.method;
+		}
+		let paramString;
+		if (params == undefined) {
+			paramString = "";
+		} else if (params.toString && params.toString != Object.prototype.toString) {
+			paramString = params.toString();
+		} else {
+			paramString = JSON.stringify(params);
+		}
+		console.log(`sendNotification: ${typeString}, params: ${paramString}`);
+		return next(type, params);
+	}
+
+	async sendRequest<P, R>(this: void, type: string | MessageSignature, param: P | undefined, token: CancellationToken | undefined, next: (type: string | MessageSignature, param?: P, token?: CancellationToken) => Promise<R>): Promise<R> {
+		let typeString;
+		if (typeof type === 'string') {
+			typeString = type;
+		} else {
+			typeString = type.method;
+		}
+
+		let paramString;
+		if (param == undefined) {
+			paramString = "";
+		} else if (param.toString && param.toString != Object.prototype.toString) {
+			paramString = param.toString();
+		} else {
+			paramString = JSON.stringify(param);
+		}
+		console.log(`sendRequest: ${typeString}, params: ${paramString}`);
+		const resp = await next(type, param, token);
+		let respString;
+		if (resp == undefined) {
+			respString = "";
+		} else if (resp.toString && resp.toString != Object.prototype.toString) {
+			respString = resp.toString();
+		} else {
+			respString = JSON.stringify(resp);
+		}
+		console.log(`sendRequest: ${typeString}, response: ${respString}`);
+		return resp;
+	}
+
+}

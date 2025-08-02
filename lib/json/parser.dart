@@ -1,3 +1,4 @@
+import 'package:analyzer/dart/ast/token.dart';
 import 'package:easy_localization_lsp/json/tokenizer.dart';
 import 'package:easy_localization_lsp/util/location.dart';
 
@@ -44,7 +45,9 @@ class JsonLocationMap extends JsonLocationValue {
   bool operator ==(Object other) {
     if (identical(this, other)) return true;
 
-    return other is JsonLocationMap && other.value == value && other.location == location;
+    return other is JsonLocationMap &&
+        other.value == value &&
+        other.location == location;
   }
 
   @override
@@ -78,7 +81,9 @@ class JsonLocationList extends JsonLocationValue {
   bool operator ==(Object other) {
     if (identical(this, other)) return true;
 
-    return other is JsonLocationList && other.value == value && other.location == location;
+    return other is JsonLocationList &&
+        other.value == value &&
+        other.location == location;
   }
 
   @override
@@ -104,7 +109,9 @@ class JsonLocationString extends JsonLocationValue {
   bool operator ==(Object other) {
     if (identical(this, other)) return true;
 
-    return other is JsonLocationString && other.value == value && other.location == location;
+    return other is JsonLocationString &&
+        other.value == value &&
+        other.location == location;
   }
 
   @override
@@ -135,7 +142,9 @@ class JsonLocationNumber extends JsonLocationValue {
   bool operator ==(Object other) {
     if (identical(this, other)) return true;
 
-    return other is JsonLocationNumber && other.value == value && other.location == location;
+    return other is JsonLocationNumber &&
+        other.value == value &&
+        other.location == location;
   }
 
   @override
@@ -166,7 +175,9 @@ class JsonLocationBool extends JsonLocationValue {
   bool operator ==(Object other) {
     if (identical(this, other)) return true;
 
-    return other is JsonLocationBool && other.value == value && other.location == location;
+    return other is JsonLocationBool &&
+        other.value == value &&
+        other.location == location;
   }
 
   @override
@@ -220,7 +231,8 @@ abstract class JsonLocationValueVisitor<T> {
 class JsonParser {
   final JsonTokenizer tokenizer;
 
-  JsonParser(String source, {String sourceName = "source"}) : tokenizer = JsonTokenizer(source, sourceName: sourceName);
+  JsonParser(String source, {String sourceName = "source"})
+      : tokenizer = JsonTokenizer(source, sourceName: sourceName);
 
   JsonLocationValue parse() {
     final token = tokenizer.peek();
@@ -324,13 +336,79 @@ class JsonParser {
   }
 
   JsonLocationBool _parseBool(bool value) {
-    final token = _consume(value ? JsonTokenType.trueValue : JsonTokenType.falseValue);
+    final token =
+        _consume(value ? JsonTokenType.trueValue : JsonTokenType.falseValue);
     return JsonLocationBool(value, token.location);
   }
 
   JsonLocationNull _parseNull() {
     final token = _consume(JsonTokenType.nullValue);
     return JsonLocationNull(token.location);
+  }
+}
+
+enum ParsingErrorType {
+  tokenizationError,
+  unexpectedToken;
+}
+
+class ParsingError {
+  final Location location;
+  final String message;
+  final ParsingErrorType type;
+  final dynamic additionalData;
+
+  ParsingError(
+    this.type, {
+    String? message,
+    required this.location,
+    this.additionalData,
+  }) : message = message ?? ParsingError._defaultMessage(type, additionalData);
+
+  static _defaultMessage(ParsingErrorType type, dynamic additionalData) {
+    return switch (type) {
+      ParsingErrorType.tokenizationError =>
+        'Tokenization Error: $additionalData',
+      ParsingErrorType.unexpectedToken => 'Unexpected token: $additionalData',
+    };
+  }
+}
+
+class RecoveringJsonParser {
+  final RecoveringJsonTokenizer tokenizer;
+
+  RecoveringJsonParser(String source, {String sourceName = "source"})
+      : tokenizer = RecoveringJsonTokenizer(source, sourceName: sourceName);
+
+  (JsonLocationValue, List<ParsingError>) parse() {
+    final result = tokenizer.peek();
+
+    switch (result) {
+      case TokenizationResult(
+          token: JsonToken(type: JsonTokenType.leftCurlyBracket)
+        ):
+        return _parseMap();
+      case TokenizationResult(
+          token: JsonToken(type: JsonTokenType.leftSquareBracket)
+        ):
+        return _parseList();
+      case TokenizationResult(token: JsonToken(type: JsonTokenType.string)):
+        return _parseString();
+      case TokenizationResult(token: JsonToken(type: JsonTokenType.number)):
+        return _parseNumber();
+      case TokenizationResult(token: JsonToken(type: JsonTokenType.trueValue)):
+        return _parseBool(true);
+      case TokenizationResult(token: JsonToken(type: JsonTokenType.falseValue)):
+        return _parseBool(false);
+      case TokenizationResult(token: JsonToken(type: JsonTokenType.nullValue)):
+        return _parseNull();
+      default:
+        tokenizer.next();
+        final (returned, errors) = parse();
+        errors.add(ParsingError(ParsingErrorType.unexpectedToken,
+            location: result.token.location, additionalData: result.token));
+      // throw Exception('Unexpected token: $token');
+    }
   }
 }
 
